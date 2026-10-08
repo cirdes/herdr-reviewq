@@ -96,6 +96,12 @@ pub struct PrRecord {
     pub author: String,
     pub url: String,
     pub head_ref: String,
+    /// Branch alvo do PR segundo o GitHub (vazio em estado de antes deste campo).
+    #[serde(default)]
+    pub base_ref: String,
+    /// Base que o daemon já buscou e gravou como escolha do reviewr no worktree.
+    #[serde(default)]
+    pub synced_base: Option<String>,
     pub remote: Remote,
     pub ownership: Ownership,
     pub phase: Phase,
@@ -272,6 +278,8 @@ impl PrRecord {
             author: "ana".into(),
             url: format!("https://github.com/{repo}/pull/{number}"),
             head_ref: head_ref.into(),
+            base_ref: "main".into(),
+            synced_base: Some("main".into()),
             remote: Remote::Pending,
             ownership: Ownership::Managed,
             phase: Phase::Ready,

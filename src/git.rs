@@ -4,6 +4,8 @@ use chrono::{DateTime, Utc};
 use std::path::Path;
 use std::time::Duration;
 
+const REVIEWR_BASE_PICK: &str = "refs/worktree/reviewr/base-pick";
+
 pub struct Git<'a> {
     runner: &'a dyn Runner,
     no_optional_locks: bool,
@@ -46,6 +48,23 @@ impl<'a> Git<'a> {
             bail!("git fetch {branch} falhou: {}", out.stderr.trim());
         }
         self.ok(repo, &["rev-parse", &format!("refs/remotes/origin/{branch}")])
+    }
+
+    /// Escolha de base do reviewr para este worktree. Formato privado do plugin
+    /// persiyanov.reviewr (src/git.rs, `BASE_PICK_REF`): ref por worktree apontando para um
+    /// blob com o nome da branch, que ele resolve primeiro em `origin/<nome>`.
+    pub fn reviewr_base_pick(&self, wt: &Path) -> Result<Option<String>> {
+        let out = self.raw(wt, &["cat-file", "blob", REVIEWR_BASE_PICK], 60)?;
+        Ok(if out.success() { Some(out.stdout.trim().to_string()).filter(|s| !s.is_empty()) } else { None })
+    }
+
+    pub fn set_reviewr_base_pick(&self, wt: &Path, base: &str) -> Result<()> {
+        // O runner não tem stdin: o blob nasce de um arquivo no git dir privado do worktree.
+        let tmp = self.ok(wt, &["rev-parse", "--path-format=absolute", "--git-path", "reviewq-base-pick"])?;
+        std::fs::write(&tmp, base)?;
+        let blob = self.ok(wt, &["hash-object", "-w", &tmp]);
+        let _ = std::fs::remove_file(&tmp);
+        self.ok(wt, &["update-ref", REVIEWR_BASE_PICK, &blob?]).map(|_| ())
     }
 
     pub fn fetch_origin(&self, repo: &Path) -> Result<()> {
@@ -152,6 +171,22 @@ mod tests {
         let fx = fixture("feat/x");
         let g = Git::new(&RealRunner);
         assert_eq!(g.fetch_branch(&fx.clone, "feat/x").unwrap(), fx.remote_sha("feat/x"));
+    }
+
+    #[test]
+    fn reviewr_base_pick_is_per_worktree() {
+        let fx = fixture("feat/x");
+        let g = Git::new(&RealRunner);
+        g.fetch_branch(&fx.clone, "feat/x").unwrap();
+        let wt = fx.root.join("wt-pick");
+        git(&fx.clone, &["worktree", "add", "-q", "-b", "feat/x", wt.to_str().unwrap(), "origin/feat/x"]);
+        assert_eq!(g.reviewr_base_pick(&wt).unwrap(), None);
+        g.set_reviewr_base_pick(&wt, "feat/a").unwrap();
+        assert_eq!(g.reviewr_base_pick(&wt).unwrap().as_deref(), Some("feat/a"));
+        g.set_reviewr_base_pick(&wt, "main").unwrap();
+        assert_eq!(g.reviewr_base_pick(&wt).unwrap().as_deref(), Some("main"));
+        assert_eq!(g.reviewr_base_pick(&fx.clone).unwrap(), None);
+        assert_eq!(git(&wt, &["status", "--porcelain"]), "");
     }
 
     #[test]

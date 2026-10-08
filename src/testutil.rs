@@ -61,6 +61,13 @@ impl Fixture {
         git(&self.author, &["rev-parse", "HEAD"])
     }
 
+    /// Autor abre `branch` a partir de `from` com um commit em `file` e faz push; devolve o sha.
+    pub fn author_branch(&self, from: &str, branch: &str, file: &str) -> String {
+        git(&self.author, &["checkout", "-q", from]);
+        git(&self.author, &["checkout", "-qb", branch]);
+        self.author_push(branch, file, &format!("{branch}\n"))
+    }
+
     /// Autor reescreve o último commit e faz force-push; devolve o novo sha.
     pub fn author_force_push(&self, branch: &str) -> String {
         git(&self.author, &["checkout", "-q", branch]);
