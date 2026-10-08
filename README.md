@@ -1,52 +1,114 @@
 # herdr-reviewq
 
-![Painel do reviewq no herdr](assets/tui.svg)
+![The reviewq panel in herdr](assets/tui.svg)
 
-Daemon que monta worktrees no herdr para os PRs com review pedido diretamente a você e prepara o ambiente. Quando o PR deixa de estar pendente, remove o worktree só se ele estiver intocado e só depois da carência (`remove_grace_secs`, 15 min por padrão). Worktree adotado ou alterado fica onde está, com alerta no `status`. PRs de fork e pedidos feitos só ao time são ignorados.
+A macOS daemon that turns your GitHub review queue into ready-to-use [herdr](https://herdr.dev) workspaces.
 
-## Instalar (macOS)
+When someone requests your review on a pull request, reviewq creates a git worktree for the PR, opens it as a herdr workspace and runs the repo's setup commands (`mise install`, `bundle install`, `pnpm install`, and so on). You get a notification when the worktree is ready. Once the PR leaves your queue (you reviewed it, or it was closed or merged), reviewq waits for a grace period and then removes the worktree, but only if you never touched it.
 
-1. Pré-requisitos: `gh` autenticado (`gh auth login` + `gh auth setup-git`), `mise`, herdr 0.9.3+, Rust (cargo) e um clone local de cada repo que você revisa.
-2. `mkdir -p ~/.config/herdr-reviewq && cp config.example.toml ~/.config/herdr-reviewq/config.toml` e ajustar `repos` (nome, caminho do clone, comandos de setup) e `disposable_ignored` (ignorados que o setup cria, como `node_modules`). Chave desconhecida na config é erro.
-3. `cargo build --release && ./target/release/herdr-reviewq service install` (copia o binário para `~/.local/bin` e registra o LaunchAgent).
+A herdr plugin adds a panel that shows your pending reviews, the state of each worktree and how many reviews you did today.
 
-## Usar
+> The panel and messages are currently in Portuguese.
 
-- `herdr-reviewq status` — pendentes, prontos, adotados, alertas.
-- `herdr-reviewq request sync` — consulta o GitHub agora.
-- `herdr-reviewq request retry --pr owner/repo#123` — refaz setup que falhou ou recria worktree bloqueado (só para worktree gerenciado).
-- `herdr-reviewq request adopt --pr ...` — marca o worktree como seu antes de mexer nele.
-- `herdr-reviewq request release --pr ...` — libera um worktree adotado (só se estiver limpo e com tudo no origin).
-- `herdr-reviewq service restart` — reinicia o daemon (depois de mudar a config); `service uninstall` — remove o LaunchAgent.
-- Logs: `~/.local/state/herdr-reviewq/daemon.log` e `logs/` (um por PR, saída redigida).
+## How it works
 
-## Painel no herdr
+- **What it tracks.** Pull requests where your review was requested directly. It ignores PRs from forks and requests made only to a team you belong to.
+- **Polling.** The daemon checks GitHub through the `gh` CLI every `poll_interval_secs` (60 s by default).
+- **New request.** It creates a worktree on the PR's branch, opens a herdr workspace for it and runs the setup steps. Each step has its own timeout, and the output is saved to a redacted per-PR log.
+- **New commits.** When the PR gets new commits, it updates the worktree with `git reset --keep`, which refuses to overwrite local changes.
+- **PR leaves your queue.** It waits `remove_grace_secs` (15 min by default), then removes the worktree and the local branch it created. If the review is requested again later, the worktree comes back.
+- **Your own work is safe.** If you commit, switch branches or edit files in a worktree, reviewq leaves it in place and shows an alert in `status`. Worktrees you moved to another branch are marked as *adopted*. You can also adopt a worktree yourself before you start working in it. Adopted worktrees are never removed automatically.
 
-1. `cargo build --release && ./target/release/herdr-reviewq service install` (troca o binário estável em `~/.local/bin` e reinicia o daemon).
-2. `herdr plugin link ~/Workspaces/herdr-reviewq` (uma vez; vale na hora, sem `reload-config`). O link aponta para o working tree do repo: um checkout de branch sem `herdr-plugin.toml` e `bin/herdr-reviewq` quebra o painel e as actions; ao voltar, rode `herdr plugin link` de novo.
-3. O daemon cria o workspace `reviewq` ao subir. Para trazê-lo de volta: action "reviewq: abrir painel" (associe um atalho no herdr) ou `herdr-reviewq ui open`. A action "reviewq: primeiro PR pronto" (`herdr-reviewq focus first-ready`) leva ao PR pronto mais antigo, e "reviewq: sincronizar agora" equivale a `request sync`.
-4. Atualizações: repetir o passo 1. O painel aberto continua com o binário antigo até ser reaberto: feche o pane e use "abrir painel".
+## Requirements
 
-Sair do TUI (`q`) fecha o pane, porque o pane termina junto com o comando. O plugin sempre executa o binário instalado em `~/.local/bin`. Início, saída (tecla ou sinal) e erros do TUI ficam em `~/.local/state/herdr-reviewq/logs/tui.log`.
+- macOS (the daemon runs as a launchd LaunchAgent)
+- [herdr](https://herdr.dev) 0.9.3 or newer
+- The [GitHub CLI](https://cli.github.com), authenticated: `gh auth login`, then `gh auth setup-git`
+- Rust and cargo, to build the binary
+- A local clone of every repo you review
+- Whatever your setup commands need, for example [mise](https://mise.jdx.dev)
 
-### Teclas do painel
+## Install
 
-| Tecla | Ação |
+1. Create the config:
+
+   ```sh
+   mkdir -p ~/.config/herdr-reviewq
+   cp config.example.toml ~/.config/herdr-reviewq/config.toml
+   ```
+
+   In `[[repos]]`, set each repo's `name` (`owner/repo`), the `path` to your local clone and its `setup` commands.
+
+   In `disposable_ignored`, list the ignored paths your setup creates (such as `node_modules` or `vendor/bundle`). These are the only ignored files reviewq may delete along with a worktree.
+
+   Unknown config keys are an error.
+
+2. Build and install the daemon:
+
+   ```sh
+   cargo build --release
+   ./target/release/herdr-reviewq service install
+   ```
+
+   This copies the binary to `~/.local/bin/herdr-reviewq` and registers and starts the LaunchAgent.
+
+3. Link the herdr plugin. You only need to do this once, and it takes effect immediately, with no reload:
+
+   ```sh
+   herdr plugin link /path/to/herdr-reviewq
+   ```
+
+   The link points at your working tree. If you check out a branch that lacks `herdr-plugin.toml` or `bin/herdr-reviewq`, the panel and actions break. Run `herdr plugin link` again after switching back.
+
+To update, pull and repeat step 2. A panel that is already open keeps running the old binary until you close its pane and open the panel again.
+
+## The panel
+
+The daemon opens a `reviewq` workspace with the panel every time it starts. herdr actions are available for keyboard shortcuts:
+
+| Action | Command | What it does |
+|---|---|---|
+| `open` | `herdr-reviewq ui open` | Opens the panel, or recreates it if you closed it |
+| `first-ready` | `herdr-reviewq focus first-ready` | Jumps to the oldest PR that is ready for review |
+| `sync-now` | `herdr-reviewq request sync` | Checks GitHub right away |
+
+Quitting the panel (`q`) closes its pane, because the pane ends with its command. The panel always runs the binary installed in `~/.local/bin`. Panel start, exit (key or signal) and errors are logged to `~/.local/state/herdr-reviewq/logs/tui.log`.
+
+### Keys
+
+| Key | Action |
 |---|---|
-| `↑` `↓` / `k` `j` | mover a seleção |
-| `enter` | abrir o workspace do PR (recria se estiver fechado) |
-| `o` | abre o PR no navegador da máquina do daemon e copia a URL via OSC 52 (útil em sessão remota) |
-| `l` | abrir o log do PR |
-| `s` | sincronizar agora |
-| `R` | tentar de novo (só PR gerenciado com setup falho ou bloqueado sem worktree) |
-| `a` | adotar o worktree (pede confirmação `y`/`n`) |
-| `r` | liberar o worktree adotado (pede confirmação `y`/`n`) |
-| `q` / `esc` / `ctrl+c` | sair |
+| `↑` `↓` / `k` `j` | Move the selection |
+| `enter` | Open the PR's workspace (recreated if it was closed) |
+| `o` | Open the PR in the browser on the daemon's machine, and copy the URL through OSC 52 (handy over a remote session) |
+| `l` | Open the PR's setup log |
+| `s` | Sync now |
+| `R` | Retry (managed PRs only, when setup failed or the worktree is missing) |
+| `a` | Adopt the worktree (asks for `y`/`n`) |
+| `r` | Release an adopted worktree (asks for `y`/`n`) |
+| `q` / `esc` / `ctrl+c` | Quit |
 
-## Garantias
+## Command line
 
-- Remove sozinho só depois da carência e só worktree impecável: mesma branch e sha que o daemon colocou, nada alterado, nada novo, nenhum ignorado fora da lista de descartáveis.
-- Nunca roda `reset --hard`, `clean` nem `--force`; atualização usa `reset --keep`.
-- Branch só é apagada se foi o daemon que a criou, se ainda está no sha dele e se não está aberta em outro worktree.
-- Antes de reset ou remoção, o sha anterior fica em `refs/reviewq/backup/pr-<n>/<ts>` por 14 dias.
-- Falha ao consultar o GitHub nunca remove nada; falha ao salvar o estado interrompe o ciclo.
+| Command | What it does |
+|---|---|
+| `herdr-reviewq status` | Pending, ready and adopted PRs, today's count and alerts |
+| `herdr-reviewq request sync` | Check GitHub now |
+| `herdr-reviewq request retry --pr owner/repo#123` | Rerun a failed setup, or recreate a missing worktree (managed worktrees only) |
+| `herdr-reviewq request adopt --pr owner/repo#123` | Mark a worktree as yours before you work in it |
+| `herdr-reviewq request release --pr owner/repo#123` | Hand an adopted worktree back. Only works if it is clean and everything is pushed. |
+| `herdr-reviewq service restart` | Restart the daemon, for example after editing the config |
+| `herdr-reviewq service uninstall` | Remove the LaunchAgent |
+
+Logs live in `~/.local/state/herdr-reviewq/`: `daemon.log`, plus one redacted setup log per PR under `logs/`.
+
+## Safety guarantees
+
+- **Only pristine worktrees are removed, and only after the grace period.** Pristine means:
+  - same branch and commit that reviewq checked out;
+  - no tracked changes and no new files;
+  - no ignored files outside `disposable_ignored`.
+- **No destructive git commands.** reviewq never runs `reset --hard`, `clean` or `--force`. Updates use `reset --keep`.
+- **Local branches are deleted only when reviewq created them**, they still point at reviewq's commit and no other worktree has them checked out.
+- **Backups before changes.** Before any reset or removal, the previous commit is saved under `refs/reviewq/backup/pr-<n>/<timestamp>` and kept for 14 days.
+- **Failures fail safe.** A failed GitHub query never removes anything, and a failure to save state stops the cycle.
