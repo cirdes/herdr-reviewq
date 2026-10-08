@@ -1,5 +1,7 @@
 # herdr-reviewq
 
+![Painel do reviewq no herdr](assets/tui.svg)
+
 Daemon que monta worktrees no herdr para os PRs com review pedido diretamente a você e prepara o ambiente. Quando o PR deixa de estar pendente, remove o worktree só se ele estiver intocado e só depois da carência (`remove_grace_secs`, 15 min por padrão). Worktree adotado ou alterado fica onde está, com alerta no `status`. PRs de fork e pedidos feitos só ao time são ignorados.
 
 ## Instalar (macOS)
