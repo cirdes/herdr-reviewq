@@ -323,4 +323,120 @@ mod tests {
             t.draw(|f| draw(f, &view, &ui)).unwrap();
         }
     }
+
+    /// Gera `assets/tui.svg` para o README, com dados fictícios:
+    /// `cargo test --lib readme_screenshot -- --ignored`
+    #[test]
+    #[ignore]
+    fn readme_screenshot() {
+        use crate::state::{Phase, ReviewsTodaySuccess};
+        use ratatui::style::Color as C;
+        let now = Utc::now();
+        let mut s = State::default();
+        s.repos.insert("acme/app".into(), RepoStatus { ok: true, last_sync: Some(now - chrono::Duration::seconds(20)), ..Default::default() });
+        let pr = |n: u64, author: &str, title: &str, phase: Phase, age_min: i64| {
+            let mut r = PrRecord::fixture("acme/app", n, "feat/x", "s");
+            r.author = author.into();
+            r.title = title.into();
+            r.phase = phase;
+            r.first_seen_at = now - chrono::Duration::minutes(age_min);
+            r
+        };
+        s.insert(pr(4821, "marina", "feat: exporta relatório de fornecedores em CSV", Phase::Ready, 95));
+        s.insert(pr(4830, "joao", "fix: valida CNPJ com dígito verificador zero", Phase::Ready, 60));
+        s.insert(pr(4834, "bia", "refactor: extrai cliente HTTP do módulo de cotações", Phase::Preparing, 3));
+        s.insert(pr(4835, "rafa", "test: cobre reprocessamento de webhooks", Phase::Failed { step: "pnpm install".into(), reason: "exit 1".into() }, 8));
+        let mut leaving = pr(4812, "lu", "feat: filtro por categoria no painel", Phase::Ready, 300);
+        leaving.remote = crate::state::Remote::NotPending;
+        leaving.not_pending_since = Some(now - chrono::Duration::minutes(3));
+        s.insert(leaving);
+        let mut adopted = pr(4799, "voce", "feat: aprovação em lote de cadastros", Phase::Ready, 900);
+        adopted.ownership = Ownership::Adopted { reason: "trocou para stack/lote-2".into(), at: now };
+        s.insert(adopted);
+        let day = crate::today::local_day(now);
+        s.reviews_today.last_success = Some(ReviewsTodaySuccess {
+            day, count: 6, per_repo: [("acme/app".to_string(), 6)].into(), as_of: now - chrono::Duration::minutes(2),
+            viewer: "voce".into(), repos: vec!["acme/app".into()],
+        });
+        let cfg = ViewConfig { repos: vec!["acme/app".into()], poll_interval_secs: 60, remove_grace: chrono::Duration::minutes(15) };
+        let ui = UiState::default();
+        let mut view = View::build(Some(&s), &ui, &cfg, &UiFacts::default(), now);
+        let ui = UiState { selected: view.order().first().cloned(), ..ui };
+        view = View::build(Some(&s), &ui, &cfg, &UiFacts::default(), now);
+        let (w, h) = (118u16, 20u16);
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| draw(f, &view, &ui)).unwrap();
+        let buf = t.backend().buffer().clone();
+
+        let (fg0, bg0) = ("#d4d4d4", "#1e1e1e");
+        let rgb = |c: C, def: &'static str| -> &'static str {
+            match c {
+                C::Reset => def,
+                C::Black => "#1e1e1e",
+                C::Red | C::LightRed => "#f14c4c",
+                C::Green | C::LightGreen => "#23d18b",
+                C::Yellow | C::LightYellow => "#e5c07b",
+                C::Blue | C::LightBlue => "#3b8eea",
+                C::Magenta | C::LightMagenta => "#c678dd",
+                C::Cyan | C::LightCyan => "#29b8db",
+                C::Gray => "#a0a0a0",
+                C::DarkGray => "#767676",
+                C::White => "#ffffff",
+                _ => def,
+            }
+        };
+        let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+        let (cw, lh, pad) = (8.6f32, 19.0f32, 16.0f32);
+        let (pw, ph) = (w as f32 * cw + 2.0 * pad, h as f32 * lh + 2.0 * pad + 28.0);
+        let mut out = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pw}\" height=\"{ph}\" viewBox=\"0 0 {pw} {ph}\">\n\
+             <rect width=\"100%\" height=\"100%\" rx=\"10\" fill=\"{bg0}\"/>\n\
+             <circle cx=\"20\" cy=\"16\" r=\"6\" fill=\"#ff5f56\"/><circle cx=\"40\" cy=\"16\" r=\"6\" fill=\"#ffbd2e\"/><circle cx=\"60\" cy=\"16\" r=\"6\" fill=\"#27c93f\"/>\n\
+             <g font-family=\"ui-monospace,SFMono-Regular,Menlo,Consolas,monospace\" font-size=\"14\" xml:space=\"preserve\">\n"
+        );
+        let top = 28.0 + pad;
+        for y in 0..h {
+            let mut x = 0u16;
+            while x < w {
+                let c = &buf[(x, y)];
+                let key = (c.fg, c.bg, c.modifier);
+                let start = x;
+                let mut text = String::new();
+                while x < w && { let d = &buf[(x, y)]; (d.fg, d.bg, d.modifier) == key } {
+                    text.push_str(buf[(x, y)].symbol());
+                    x += 1;
+                }
+                let rev = key.2.contains(Modifier::REVERSED);
+                let (mut fg, mut bg) = (rgb(key.0, fg0), rgb(key.1, bg0));
+                if rev {
+                    std::mem::swap(&mut fg, &mut bg);
+                }
+                let px = pad + start as f32 * cw;
+                let py = top + y as f32 * lh;
+                if bg != bg0 {
+                    out += &format!("<rect x=\"{px}\" y=\"{}\" width=\"{}\" height=\"{lh}\" fill=\"{bg}\"/>\n", py - 14.0, (x - start) as f32 * cw);
+                }
+                // um <text> por trecho sem espaço, na coluna exata (renderizadores de SVG colapsam espaços)
+                let weight = if key.2.contains(Modifier::BOLD) { " font-weight=\"bold\"" } else { "" };
+                let cells: Vec<char> = text.chars().collect();
+                let mut i = 0;
+                while i < cells.len() {
+                    if cells[i] == ' ' { i += 1; continue; }
+                    let j = (i..cells.len()).find(|&k| cells[k] == ' ').unwrap_or(cells.len());
+                    let seg: String = cells[i..j].iter().collect();
+                    out += &format!(
+                        "<text x=\"{}\" y=\"{py}\" fill=\"{fg}\"{weight} textLength=\"{}\" lengthAdjust=\"spacingAndGlyphs\">{}</text>\n",
+                        px + i as f32 * cw,
+                        (j - i) as f32 * cw,
+                        esc(&seg)
+                    );
+                    i = j;
+                }
+            }
+        }
+        out += "</g>\n</svg>\n";
+        std::fs::create_dir_all("assets").unwrap();
+        std::fs::write("assets/tui.svg", out).unwrap();
+        println!("{}", screen(w, h, &view, &ui));
+    }
 }
