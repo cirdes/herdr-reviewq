@@ -112,3 +112,5 @@ Logs live in `~/.local/state/herdr-reviewq/`: `daemon.log`, plus one redacted se
 - **Local branches are deleted only when reviewq created them**, they still point at reviewq's commit and no other worktree has them checked out.
 - **Backups before changes.** Before any reset or removal, the previous commit is saved under `refs/reviewq/backup/pr-<n>/<timestamp>` and kept for 14 days.
 - **Failures fail safe.** A failed GitHub query never removes anything, and a failure to save state stops the cycle.
+- **Diffs match GitHub's.** reviewq fetches the PR's base branch (`baseRefName`; for a stacked PR, the branch of the PR below it) into `origin/<base>` when it creates the worktree, on every push by the author and whenever GitHub retargets the PR. Local branches, like the clone's `main`, are never touched, so compare against `origin/<base>`, not `main`.
+- **reviewr opens on the right base.** In each worktree, the base is stored as the reviewr base pick (plugin `persiyanov.reviewr`, ref `refs/worktree/reviewr/base-pick`). A base you pick yourself with `B` is never overwritten.

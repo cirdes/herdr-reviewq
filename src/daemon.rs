@@ -293,10 +293,11 @@ impl<'a> Daemon<'a> {
             if stopping() {
                 break;
             }
-            let key = match &op {
-                Op::Create(k) | Op::Update(k) | Op::Remove(k) => k.clone(),
+            let (key, touches_tree) = match &op {
+                Op::Create(k) | Op::Update(k) | Op::Remove(k) => (k.clone(), true),
+                Op::SyncBase(k) => (k.clone(), false),
             };
-            if self.job.as_ref().is_some_and(|j| j.key == key) {
+            if touches_tree && self.job.as_ref().is_some_and(|j| j.key == key) {
                 self.job = None; // Drop cancela o setup e mata o grupo
                 self.job_pid = None;
                 self.state.setup_process = None;

@@ -12,7 +12,7 @@ pub const PENDING_QUERY: &str = r#"query($q: String!, $owner: String!, $name: St
     nodes {
       __typename
       ... on PullRequest {
-        number title url isCrossRepository headRefName headRefOid
+        number title url isCrossRepository headRefName headRefOid baseRefName
         author { login }
         reviewRequests(first: 100) {
           pageInfo { hasNextPage }
@@ -37,6 +37,8 @@ pub struct PendingPr {
     pub url: String,
     pub head_ref: String,
     pub head_sha: String,
+    /// Branch alvo do PR; em PR empilhado é a branch do PR de baixo.
+    pub base_ref: String,
     pub is_fork: bool,
     pub last_request_event_at: Option<DateTime<Utc>>,
 }
@@ -144,6 +146,7 @@ pub fn parse_page(json: &str, repo: &str) -> Result<Page, FetchError> {
             url: str_at(node, "/url")?,
             head_ref: str_at(node, "/headRefName")?,
             head_sha: str_at(node, "/headRefOid")?,
+            base_ref: str_at(node, "/baseRefName")?,
             is_fork: bool_at(node, "/isCrossRepository")?,
             last_request_event_at,
         });
@@ -457,7 +460,7 @@ pub(crate) fn pr_node(n: u64, head: &str, sha: &str, requested: &str, fork: bool
     serde_json::json!({
         "__typename": "PullRequest",
         "number": n, "title": format!("PR {n}"), "url": format!("https://github.com/o/r/pull/{n}"),
-        "isCrossRepository": fork, "headRefName": head, "headRefOid": sha, "author": {"login": "ana"},
+        "isCrossRepository": fork, "headRefName": head, "headRefOid": sha, "baseRefName": "main", "author": {"login": "ana"},
         "reviewRequests": {"pageInfo": {"hasNextPage": false},
             "nodes": [{"requestedReviewer": {"__typename": "User", "login": requested}}]},
         "timelineItems": {"nodes": [{"createdAt": "2026-10-07T10:00:00Z", "requestedReviewer": {"login": requested}}]}
@@ -492,6 +495,7 @@ mod tests {
         assert_eq!(page.prs.len(), 2);
         assert_eq!(page.prs[0].number, 1);
         assert_eq!(page.prs[0].head_ref, "feat/x");
+        assert_eq!(page.prs[0].base_ref, "main");
         assert!(!page.prs[0].is_fork);
         assert!(page.prs[1].is_fork);
         assert!(page.next_cursor.is_none());

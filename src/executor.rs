@@ -69,7 +69,44 @@ pub fn create(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<()> {
     if let Err(e) = git.set_upstream(&rec.path, &rec.head_ref) {
         rec.warning = Some(format!("upstream não configurado: {e:#}"));
     }
+    // Falha aqui não desfaz o worktree: o SyncBase do próximo ciclo tenta de novo.
+    if let Err(e) = sync_base_of(&git, &repo.path, rec) {
+        rec.warning = Some(format!("base do PR não sincronizada: {e:#}"));
+    }
     Ok(())
+}
+
+/// Traz `origin/<base>` e grava a base como escolha do reviewr, para o diff do worktree
+/// bater com o do GitHub. Só mexe em `refs/remotes/origin/*` e no ref privado do reviewr:
+/// vale também para worktree adotado, e nunca avança o `main` local, que é do usuário.
+pub fn sync_base(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<Option<String>> {
+    let repo = ctx.repo(key)?;
+    sync_base_of(&ctx.git(), &repo.path, record(state, key)?)
+}
+
+fn sync_base_of(git: &Git, repo: &Path, rec: &mut PrRecord) -> Result<Option<String>> {
+    let base = rec.base_ref.clone();
+    if base.is_empty() {
+        return Ok(None);
+    }
+    if !rec.path.exists() {
+        // Recriado pelo retry, o worktree passa pelo create, que sincroniza de novo.
+        rec.synced_base = Some(base);
+        return Ok(None);
+    }
+    git.fetch_branch(repo, &base).with_context(|| format!("base {base} não buscada"))?;
+    let mut note = None;
+    if rec.synced_base.as_deref() != Some(base.as_str()) {
+        let current = git.reviewr_base_pick(&rec.path)?;
+        // Só sobrescreve o que o daemon gravou (ou nada); uma escolha feita no reviewr fica.
+        if current.is_none() || current == rec.synced_base {
+            git.set_reviewr_base_pick(&rec.path, &base)?;
+        } else if current.as_deref() != Some(base.as_str()) {
+            note = Some(format!("base do PR agora é {base}; escolha manual do reviewr ({}) preservada", current.unwrap_or_default()));
+        }
+    }
+    rec.synced_base = Some(base);
+    Ok(note)
 }
 
 pub fn update(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<()> {
@@ -243,6 +280,7 @@ pub fn run_op(ctx: &Ctx, state: &mut State, op: &Op) -> Result<Option<String>> {
         Op::Create(k) => create(ctx, state, k).map(|_| None),
         Op::Update(k) => update(ctx, state, k).map(|_| None),
         Op::Remove(k) => remove(ctx, state, k),
+        Op::SyncBase(k) => sync_base(ctx, state, k),
     }
 }
 
@@ -301,6 +339,102 @@ mod tests {
         assert_eq!(rec.workspace_id.as_deref(), Some("w1"));
         assert_eq!(git(&rec.path, &["rev-parse", "--abbrev-ref", "@{u}"]), "origin/feat/x");
         assert_eq!(git(&rec.path, &["rev-parse", "--abbrev-ref", "HEAD"]), BRANCH);
+    }
+
+    /// PR `head` contra `base`, pronto para o create.
+    fn creating_pr(fx: &Fixture, cfg: &Config, head: &str, base: &str) -> (State, PrKey) {
+        let (mut s, key) = creating(fx, cfg);
+        let rec = s.get_mut(&key).unwrap();
+        rec.head_ref = head.into();
+        rec.observed_head_sha = fx.remote_sha(head);
+        rec.base_ref = base.into();
+        rec.synced_base = None;
+        (s, key)
+    }
+
+    fn changed(wt: &Path, base: &str) -> String {
+        git(wt, &["diff", "--name-only", &format!("origin/{base}...HEAD")])
+    }
+
+    fn pick(path: &Path) -> Option<String> {
+        crate::git::Git::new(&RealRunner).reviewr_base_pick(path).unwrap()
+    }
+
+    #[test]
+    fn create_diffs_against_fresh_base_and_leaves_local_main_alone() {
+        let fx = fixture(BRANCH);
+        let cfg = config(&fx, "true");
+        let herdr = FakeHerdr::new();
+        let ctx = Ctx { cfg: &cfg, runner: &RealRunner, herdr: &herdr, now: Utc::now() };
+        let stale = git(&fx.clone, &["rev-parse", "main"]);
+        fx.author_push("main", "na-main.txt", "entrou depois\n");
+        fx.author_branch("main", "feat/y", "y.txt");
+        let (mut s, key) = creating_pr(&fx, &cfg, "feat/y", "main");
+        create(&ctx, &mut s, &key).unwrap();
+        let rec = s.get(&key).unwrap();
+        // O bug do PR 15682: com a base parada, viria também na-main.txt.
+        assert_eq!(changed(&rec.path, "main"), "y.txt");
+        assert_eq!(git(&fx.clone, &["rev-parse", "refs/heads/main"]), stale);
+        assert_eq!(pick(&rec.path).as_deref(), Some("main"));
+        assert_eq!(rec.synced_base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn stacked_pr_diffs_against_the_pr_below_until_retargeted() {
+        let fx = fixture(BRANCH);
+        let cfg = config(&fx, "true");
+        let herdr = FakeHerdr::new();
+        let ctx = Ctx { cfg: &cfg, runner: &RealRunner, herdr: &herdr, now: Utc::now() };
+        fx.author_branch(BRANCH, "feat/y", "y.txt");
+        fx.author_branch("feat/y", "feat/z", "z.txt");
+        let (mut s, key) = creating_pr(&fx, &cfg, "feat/y", BRANCH);
+        create(&ctx, &mut s, &key).unwrap();
+        let path = s.get(&key).unwrap().path.clone();
+        assert_eq!(changed(&path, BRANCH), "y.txt");
+        assert_eq!(pick(&path).as_deref(), Some(BRANCH));
+        // O de baixo foi mergeado: o GitHub retargeta para main e rebaseia.
+        git(&fx.author, &["checkout", "-q", "main"]);
+        git(&fx.author, &["merge", "-q", "--ff-only", BRANCH]);
+        git(&fx.author, &["push", "-q", "origin", "main", &format!(":{BRANCH}")]);
+        s.get_mut(&key).unwrap().base_ref = "main".into();
+        assert_eq!(sync_base(&ctx, &mut s, &key).unwrap(), None);
+        assert_eq!(pick(&path).as_deref(), Some("main"));
+        assert_eq!(changed(&path, "main"), "y.txt");
+        assert_eq!(s.get(&key).unwrap().synced_base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn sync_base_keeps_a_pick_made_in_reviewr() {
+        let fx = fixture(BRANCH);
+        let cfg = config(&fx, "true");
+        let herdr = FakeHerdr::new();
+        let ctx = Ctx { cfg: &cfg, runner: &RealRunner, herdr: &herdr, now: Utc::now() };
+        fx.author_branch(BRANCH, "feat/y", "y.txt");
+        let (mut s, key) = creating_pr(&fx, &cfg, "feat/y", BRANCH);
+        create(&ctx, &mut s, &key).unwrap();
+        let path = s.get(&key).unwrap().path.clone();
+        crate::git::Git::new(&RealRunner).set_reviewr_base_pick(&path, "HEAD~1").unwrap();
+        adopt(&mut s, &key);
+        s.get_mut(&key).unwrap().base_ref = "main".into();
+        let note = sync_base(&ctx, &mut s, &key).unwrap().unwrap();
+        assert!(note.contains("HEAD~1"), "{note}");
+        assert_eq!(pick(&path).as_deref(), Some("HEAD~1"));
+        assert_eq!(s.get(&key).unwrap().synced_base.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn create_survives_a_base_gone_from_remote() {
+        let fx = fixture(BRANCH);
+        let cfg = config(&fx, "true");
+        let herdr = FakeHerdr::new();
+        let ctx = Ctx { cfg: &cfg, runner: &RealRunner, herdr: &herdr, now: Utc::now() };
+        let (mut s, key) = creating_pr(&fx, &cfg, BRANCH, "sumiu");
+        create(&ctx, &mut s, &key).unwrap();
+        let rec = s.get(&key).unwrap();
+        assert_eq!(rec.phase, Phase::Preparing);
+        assert!(rec.warning.as_deref().unwrap().contains("sumiu"));
+        assert_eq!(rec.synced_base, None);
+        assert_eq!(pick(&rec.path), None);
     }
 
     #[test]

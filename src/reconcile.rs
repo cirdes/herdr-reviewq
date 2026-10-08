@@ -10,6 +10,8 @@ pub enum Op {
     Create(PrKey),
     Update(PrKey),
     Remove(PrKey),
+    /// Busca a base do PR e alinha a escolha de base do reviewr. Não toca arquivo do worktree.
+    SyncBase(PrKey),
 }
 
 pub struct Input<'a> {
@@ -96,7 +98,9 @@ fn reconcile_repo(s: &mut State, ops: &mut Vec<Op>, repo: &str, prs: &[PendingPr
             rec.not_pending_since = None;
             rec.title = p.title.clone();
             rec.last_request_event_at = p.last_request_event_at;
-            if p.head_sha != rec.observed_head_sha {
+            rec.base_ref = p.base_ref.clone();
+            let head_moved = p.head_sha != rec.observed_head_sha;
+            if head_moved {
                 rec.observed_head_sha = p.head_sha.clone();
                 match rec.ownership {
                     Ownership::Managed => rec.generation += 1,
@@ -106,20 +110,27 @@ fn reconcile_repo(s: &mut State, ops: &mut Vec<Op>, repo: &str, prs: &[PendingPr
             if rec.ownership == Ownership::Managed {
                 let applied = rec.managed_sha.as_deref() == Some(rec.observed_head_sha.as_str());
                 match rec.phase.clone() {
-                    Phase::Ready | Phase::Failed { .. } | Phase::Preparing if !applied => ops.push(Op::Update(key)),
-                    Phase::Creating => ops.push(Op::Create(key)),
+                    Phase::Ready | Phase::Failed { .. } | Phase::Preparing if !applied => ops.push(Op::Update(key.clone())),
+                    Phase::Creating => ops.push(Op::Create(key.clone())),
                     Phase::Removing => {
                         match input.facts.get(k) {
                             Some(f) if f.exists => {
                                 rec.generation += 1;
                                 rec.phase = Phase::Preparing;
                             }
-                            Some(_) => ops.push(Op::Remove(key)),
+                            Some(_) => ops.push(Op::Remove(key.clone())),
                             None => {}
                         }
                     }
                     _ => {}
                 }
+            }
+            // Base nova (PR empilhado retargetado) ou head novo (pode ter trazido main mais nova):
+            // sem a base atualizada, o merge-base fica velho e o diff carrega o que entrou nela.
+            let base_moved = rec.synced_base.as_deref() != Some(rec.base_ref.as_str());
+            let has_worktree = !matches!(rec.phase, Phase::Creating | Phase::Removing);
+            if has_worktree && !rec.base_ref.is_empty() && (base_moved || head_moved) {
+                ops.push(Op::SyncBase(key));
             }
             continue;
         }
@@ -178,6 +189,8 @@ fn new_record(p: &PendingPr, input: &Input) -> PrRecord {
         author: p.author.clone(),
         url: p.url.clone(),
         head_ref: p.head_ref.clone(),
+        base_ref: p.base_ref.clone(),
+        synced_base: None,
         remote: Remote::Pending,
         ownership: Ownership::Managed,
         phase: Phase::Creating,
@@ -212,6 +225,7 @@ mod tests {
             url: "u".into(),
             head_ref: "feat/x".into(),
             head_sha: sha.into(),
+            base_ref: "main".into(),
             is_fork: false,
             last_request_event_at: Some("2026-10-07T10:00:00Z".parse().unwrap()),
         }
@@ -343,7 +357,7 @@ mod tests {
     fn author_push_updates_managed() {
         let state = with(PrRecord::fixture(REPO, 1, "feat/x", "a1"));
         let (s, ops) = run(&state, &snap(vec![pr(1, "a2")]), &BTreeMap::new());
-        assert_eq!(ops, vec![Op::Update(key(1))]);
+        assert_eq!(ops, vec![Op::Update(key(1)), Op::SyncBase(key(1))]);
         assert_eq!(s.get(&key(1)).unwrap().observed_head_sha, "a2");
         assert_eq!(s.get(&key(1)).unwrap().generation, 1);
     }
@@ -358,6 +372,42 @@ mod tests {
     }
 
     #[test]
+    fn retarget_alone_syncs_base_for_managed_and_adopted() {
+        let mut p = pr(1, "a1");
+        p.base_ref = "feat/a".into();
+        let (s, ops) = run(&with(PrRecord::fixture(REPO, 1, "feat/x", "a1")), &snap(vec![p.clone()]), &BTreeMap::new());
+        assert_eq!(ops, vec![Op::SyncBase(key(1))]);
+        assert_eq!(s.get(&key(1)).unwrap().base_ref, "feat/a");
+        let mut adopted = PrRecord::fixture(REPO, 1, "feat/x", "a1");
+        adopted.ownership = Ownership::Adopted { reason: "x".into(), at: Utc::now() };
+        let (_, ops) = run(&with(adopted), &snap(vec![p]), &BTreeMap::new());
+        assert_eq!(ops, vec![Op::SyncBase(key(1))]);
+    }
+
+    #[test]
+    fn record_from_older_state_gets_its_base_synced_once() {
+        let mut rec = PrRecord::fixture(REPO, 1, "feat/x", "a1");
+        rec.base_ref = String::new();
+        rec.synced_base = None;
+        let (s, ops) = run(&with(rec), &snap(vec![pr(1, "a1")]), &BTreeMap::new());
+        assert_eq!(ops, vec![Op::SyncBase(key(1))]);
+        let mut synced = s.clone();
+        synced.get_mut(&key(1)).unwrap().synced_base = Some("main".into());
+        let (_, ops) = run(&synced, &snap(vec![pr(1, "a1")]), &BTreeMap::new());
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn no_base_sync_while_creating_or_removing() {
+        let mut p = pr(1, "a1");
+        p.base_ref = "feat/a".into();
+        let mut creating = PrRecord::fixture(REPO, 1, "feat/x", "a1");
+        creating.phase = Phase::Creating;
+        let (_, ops) = run(&with(creating), &snap(vec![p]), &BTreeMap::new());
+        assert_eq!(ops, vec![Op::Create(key(1))]);
+    }
+
+    #[test]
     fn author_push_only_warns_adopted() {
         let mut rec = PrRecord::fixture(REPO, 1, "feat/x", "a1");
         rec.ownership = Ownership::Adopted {
@@ -365,7 +415,8 @@ mod tests {
             at: Utc::now(),
         };
         let (s, ops) = run(&with(rec), &snap(vec![pr(1, "a2")]), &BTreeMap::new());
-        assert!(ops.is_empty());
+        // Só a base: o worktree adotado não é tocado.
+        assert_eq!(ops, vec![Op::SyncBase(key(1))]);
         assert_eq!(s.get(&key(1)).unwrap().warning.as_deref(), Some("autor atualizou o PR"));
     }
 
@@ -502,7 +553,7 @@ mod tests {
         rec.phase = Phase::Preparing;
         rec.managed_sha = Some("a1".into());
         let (s, ops) = run(&with(rec), &snap(vec![pr(1, "a2")]), &BTreeMap::new());
-        assert_eq!(ops, vec![Op::Update(key(1))]);
+        assert_eq!(ops, vec![Op::Update(key(1)), Op::SyncBase(key(1))]);
         assert_eq!(s.get(&key(1)).unwrap().observed_head_sha, "a2");
     }
 
