@@ -1,0 +1,30 @@
+id = "cirdes.reviewq"
+name = "reviewq"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+platforms = ["macos"]
+description = "Painel de reviews pendentes: worktrees prontos, feitas hoje e ações por PR."
+
+[[panes]]
+id = "tui"
+title = "reviewq"
+placement = "zoomed"
+command = ["bin/herdr-reviewq", "tui"]
+
+[[actions]]
+id = "open"
+title = "reviewq: abrir painel"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reviewq", "ui", "open"]
+
+[[actions]]
+id = "sync-now"
+title = "reviewq: sincronizar agora"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reviewq", "request", "sync"]
+
+[[actions]]
+id = "first-ready"
+title = "reviewq: primeiro PR pronto"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reviewq", "focus", "first-ready"]

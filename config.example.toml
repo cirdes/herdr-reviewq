@@ -1,0 +1,21 @@
+poll_interval_secs = 60
+worktrees_dir      = "~/Workspaces/.reviews"
+# herdr_session    = "default"   # sessão do herdr usada pelo daemon (opcional)
+step_timeout_secs  = 900
+# espera depois que o PR sai da sua lista (ex.: você aprovou) antes de remover o worktree
+remove_grace_secs  = 900
+# cadência do contador "feitas hoje" (mínimo 60)
+reviews_today_every_secs = 300
+
+[[repos]]
+name  = "owner/repo"
+path  = "~/Workspaces/repo"   # clone local do repo
+setup = ["mise trust", "mise install", "bundle install", "pnpm install"]
+# ignorados que o setup cria e que podem ser apagados junto com o worktree
+# (caminhos relativos à raiz do worktree, como o git os lista)
+disposable_ignored = ["node_modules", "vendor/bundle", "tmp", "log", ".bundle"]
+
+[notify]
+on_ready   = true
+on_removed = false
+sound      = "request"   # none | done | request
