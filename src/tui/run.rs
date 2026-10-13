@@ -870,13 +870,42 @@ mod tests {
         assert!(now - t0 >= STOP_GRACE, "{:?}", now - t0);
     }
 
-    #[test]
-    fn tty_probe_sees_hangup_and_bad_fd() {
+    /// Pty com CLOEXEC nos dois lados. O openpty não marca: um processo disparado em paralelo por
+    /// outro teste herdaria o mestre e o manteria aberto depois do `exec`, e o pty nunca "desligaria".
+    fn cloexec_pty() -> (libc::c_int, libc::c_int) {
         let (mut master, mut slave) = (0, 0);
         let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(rc, 0);
+        unsafe {
+            libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        (master, slave)
+    }
+
+    /// Escravo de um pty cujo mestre fechou. Ainda há uma janela entre o openpty e o CLOEXEC em que
+    /// um fork herda o mestre; nesse caso tenta de novo.
+    fn hung_up_slave() -> libc::c_int {
+        for _ in 0..20 {
+            let (master, slave) = cloexec_pty();
+            unsafe { libc::close(master) };
+            if tty_gone(slave) {
+                return slave;
+            }
+            unsafe { libc::close(slave) };
+        }
+        panic!("mestre fechado: o terminal sumiu");
+    }
+
+    #[test]
+    fn tty_probe_sees_hangup_and_bad_fd() {
+        let (master, slave) = cloexec_pty();
         assert!(!tty_gone(slave), "pty aberto: vivo");
-        unsafe { libc::close(master) };
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        let slave = hung_up_slave();
         assert!(tty_gone(slave), "mestre fechado: o terminal sumiu");
         unsafe { libc::close(slave) };
         // fd que nunca existiu (um número baixo poderia ser reaberto por outro teste em paralelo)
@@ -949,25 +978,8 @@ mod tests {
         use std::os::fd::FromRawFd;
         let fx = fx();
         let log = fx.paths.tui_log_file();
-        // o openpty não marca CLOEXEC: um processo disparado em paralelo por outro teste herda o
-        // mestre e o mantém aberto, e a escrita não falha. Marca na hora e tenta de novo se perder a corrida.
-        let mut hung = None;
-        for _ in 0..20 {
-            let (mut master, mut slave) = (0, 0);
-            let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
-            assert_eq!(rc, 0);
-            unsafe {
-                libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
-                libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
-                libc::close(master);
-            }
-            let mut tty = unsafe { std::fs::File::from_raw_fd(slave) };
-            if std::io::Write::write_all(&mut tty, b"x\n").is_err() {
-                hung = Some(tty);
-                break;
-            }
-        }
-        let mut tty = hung.expect("pty sem mestre: a escrita falha");
+        let mut tty = unsafe { std::fs::File::from_raw_fd(hung_up_slave()) };
+        assert!(std::io::Write::write_all(&mut tty, b"x\n").is_err(), "pty sem mestre: a escrita falha");
         report_exit(&log, &mut tty, "sinal recebido e o loop não saiu em 1 s");
         let text = std::fs::read_to_string(&log).unwrap();
         assert!(text.contains("sinal recebido"), "{text}");
