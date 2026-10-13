@@ -15,7 +15,7 @@ const BOTTOM_H: u16 = 5;
 fn section_title(s: Section) -> &'static str {
     match s {
         Section::Started => "Iniciados",
-        Section::Pending => "",
+        Section::Pending => "Pendentes",
         Section::NoSync => "Sem sync",
         Section::Leaving => "Saindo",
         Section::Adopted => "Adotados",
@@ -76,10 +76,12 @@ pub fn draw(f: &mut Frame, view: &View, ui: &UiState) {
         head,
     );
 
-    let [c1, c2, c3] = Layout::horizontal([Constraint::Length(14), Constraint::Length(16), Constraint::Min(10)]).areas(counters);
+    let [c1, c2, c3, c4] =
+        Layout::horizontal([Constraint::Length(14), Constraint::Length(16), Constraint::Length(16), Constraint::Min(0)]).areas(counters);
     f.render_widget(Paragraph::new(format!(" {}", view.pending)).block(Block::default().borders(Borders::ALL).title("Pendentes")), c1);
     f.render_widget(Paragraph::new(format!(" {}", view.today)).block(Block::default().borders(Borders::ALL).title("Feitas hoje")), c2);
-    f.render_widget(Paragraph::new(view.today_detail.clone()), Rect { y: c3.y + 1, height: 1, ..c3 });
+    f.render_widget(Paragraph::new(format!(" {}", view.opened_24h)).block(Block::default().borders(Borders::ALL).title("Abertos 24h")), c3);
+    f.render_widget(Paragraph::new(view.today_detail.clone()), Rect { y: c4.y + 1, height: 1, ..c4 });
 
     draw_list(f, list, view, ui);
     draw_bottom(f, bottom, view);
@@ -130,15 +132,33 @@ fn clip(s: &str, w: usize) -> String {
 }
 
 fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
-    // Colunas: marcador(2) rótulo(12) ícone(1) estado, depois autor e título com o que sobra.
-    const PREFIX: usize = 2 + 12 + 1 + 1 + 1;
-    let rest = (area.width as usize).saturating_sub(PREFIX);
+    // Colunas: marcador(2) rótulo ícone(1) estado, CI e Início com largura fixa; autor e título
+    // ficam com o que sobra (são eles que encolhem primeiro; sem espaço, o autor some).
+    const CI_W: usize = 10;
+    const START_W: usize = 6;
+    let label_w = view.rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0).clamp(4, 12);
+    let prefix = 2 + label_w + 1 + 1 + 1;
+    let rest = (area.width as usize).saturating_sub(prefix);
     let max_status = view.rows.iter().map(|r| r.status.chars().count()).max().unwrap_or(6).max(6);
-    let status_w = max_status.min(rest * 3 / 5).min(30);
-    let author_w = 16.min(rest.saturating_sub(status_w + 2) / 3);
-    let title_w = rest.saturating_sub(status_w + author_w + 2);
+    let status_w = max_status.min(30).min(rest.saturating_sub(CI_W + START_W + 3));
+    let free = rest.saturating_sub(status_w + CI_W + START_W + 3);
+    let author_w = if free >= 24 { 16.min(free / 3) } else { 0 };
+    let title_w = free.saturating_sub(author_w + 1);
     let selected = ui.selected_row(view).map(|r| r.id.clone());
-    let head = format!("{:<w$} {:<sw$} {:<aw$} {}", "  PR", "Estado", "Autor", "Título", w = PREFIX - 1, sw = status_w, aw = author_w);
+    let head = format!(
+        "{:<w$} {:<sw$} {:<cw$} {:<iw$} {:<aw$}{}",
+        "  PR",
+        "Estado",
+        "CI",
+        "Início",
+        if author_w > 0 { "Autor " } else { "" },
+        "Título",
+        w = prefix - 1,
+        sw = status_w,
+        cw = CI_W,
+        iw = START_W,
+        aw = if author_w > 0 { author_w + 1 } else { 0 }
+    );
     let mut lines: Vec<Line> = vec![Line::styled(clip(&head, area.width as usize), Style::new().add_modifier(Modifier::DIM))];
     let mut current: Option<Section> = None;
     let mut selected_line = 0usize;
@@ -155,15 +175,20 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
             selected_line = lines.len();
         }
         let text = format!(
-            "{} {:<12} {} {:<sw$} {:<aw$} {}",
+            "{} {:<lw$} {} {:<sw$} {:<cw$} {:<iw$} {:<aw$}{}",
             if is_sel { "▸" } else { " " },
-            clip(&row.label, 12),
+            clip(&row.label, label_w),
             row.icon,
             clip(&row.status, status_w),
-            clip(&row.author, author_w),
+            clip(&row.ci, CI_W),
+            clip(&row.started, START_W),
+            if author_w > 0 { format!("{} ", clip(&row.author, author_w)) } else { String::new() },
             clip(&row.title, title_w),
+            lw = label_w,
             sw = status_w,
-            aw = author_w
+            cw = CI_W,
+            iw = START_W,
+            aw = if author_w > 0 { author_w + 1 } else { 0 }
         );
         let style = if is_sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
         lines.push(Line::styled(text, style));
@@ -241,6 +266,80 @@ mod tests {
                 assert!(out.contains(word), "{w} faltou {word}:\n{out}");
             }
         }
+    }
+
+    #[test]
+    fn shows_section_titles_and_columns() {
+        let mut s = base_state();
+        let mut started = PrRecord::fixture("o/r", 2, "x", "s");
+        started.work_started_at = Some(Utc::now());
+        s.insert(started);
+        s.insert(PrRecord::fixture("o/r", 1, "x", "s"));
+        let out = screen(110, 24, &build(&s, &UiState::default()), &UiState::default());
+        for needle in ["Iniciados", " Pendentes", "Estado", "CI", "Início", "Autor", "Título"] {
+            assert!(out.contains(needle), "faltou {needle}:\n{out}");
+        }
+        let iniciados = out.find("Iniciados").unwrap();
+        let pendentes = out.rfind(" Pendentes").unwrap();
+        assert!(iniciados < pendentes, "{out}");
+    }
+
+    #[test]
+    fn shows_opened_24h_counter() {
+        let mut s = base_state();
+        s.my_prs.repos.insert("o/r".into(), crate::state::MyPrsRepo { prs: vec![], opened_24h: 7, as_of: Utc::now() });
+        let out = screen(110, 24, &build(&s, &UiState::default()), &UiState::default());
+        assert!(out.contains("Abertos 24h"), "{out}");
+        assert!(out.lines().any(|l| l.contains("│ 7")), "{out}");
+    }
+
+    #[test]
+    fn mine_section_rendered() {
+        let mut s = base_state();
+        s.my_prs.repos.insert(
+            "o/r".into(),
+            crate::state::MyPrsRepo {
+                prs: vec![crate::state::MyPr {
+                    number: 77,
+                    title: "Meu PR".into(),
+                    url: String::new(),
+                    draft: true,
+                    created_at: Utc::now(),
+                    head_sha: "m".into(),
+                    ci: None,
+                }],
+                opened_24h: 1,
+                as_of: Utc::now(),
+            },
+        );
+        let out = screen(110, 24, &build(&s, &UiState::default()), &UiState::default());
+        for needle in ["Meus PRs", "#77", "rascunho", "você", "Meu PR"] {
+            assert!(out.contains(needle), "faltou {needle}:\n{out}");
+        }
+    }
+
+    #[test]
+    fn narrow_keeps_status_and_grace() {
+        let now = Utc::now();
+        let mut s = base_state();
+        let mut r = PrRecord::fixture("o/r", 15672, "x", "s");
+        r.remote = crate::state::Remote::NotPending;
+        r.not_pending_since = Some(now);
+        r.work_started_at = Some(now - chrono::Duration::minutes(5));
+        r.ci = Some(crate::ci::Ci {
+            sha: "s".into(),
+            state: crate::ci::CiState::Failure,
+            failed_check: Some("rspec-system-muito-longo".into()),
+            finished_at: None,
+            observed_at: now,
+        });
+        s.insert(r);
+        let view = View::build(Some(&s), &UiState::default(), &cfg(), &UiFacts::default(), now);
+        let start = view.rows[0].started.clone();
+        let out = screen(60, 20, &view, &UiState::default());
+        assert!(out.contains("pronto · sai em 15min"), "{out}");
+        assert!(out.contains(&start), "{out}");
+        assert!(out.contains("✗ rspec"), "{out}");
     }
 
     #[test]
