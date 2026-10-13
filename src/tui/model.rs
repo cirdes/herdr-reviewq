@@ -1,7 +1,7 @@
 use crate::requests::RequestKind;
 use crate::state::{Ownership, Phase, PrKey, PrRecord, Remote, State};
 use crate::status::phase_label;
-use crate::today::{ago, local_day, local_hm, opened_24h_label, valid_success};
+use crate::today::{ago, local_hm, opened_24h_label, start_label, valid_success};
 use chrono::{DateTime, Utc};
 use std::collections::BTreeSet;
 
@@ -216,15 +216,6 @@ fn section_of(r: &PrRecord) -> Section {
     }
 }
 
-/// `HH:MM` se `t` é de hoje, senão `dd/mm` (São Paulo).
-fn started_label(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
-    if local_day(t) == local_day(now) {
-        local_hm(t)
-    } else {
-        t.with_timezone(&chrono_tz::America::Sao_Paulo).format("%d/%m").to_string()
-    }
-}
-
 fn label(key: &PrKey, cfg: &ViewConfig) -> String {
     if cfg.repos.len() > 1 { key.to_string() } else { format!("#{}", key.number) }
 }
@@ -305,7 +296,7 @@ fn row_of(r: &PrRecord, section: Section, state: &State, cfg: &ViewConfig, facts
         icon: icon(r),
         status,
         ci: crate::ci::cell(r.ci.as_ref(), &r.observed_head_sha, now),
-        started: r.work_started_at.map(|t| started_label(t, now)).unwrap_or_default(),
+        started: r.work_started_at.map(|t| start_label(t, now)).unwrap_or_default(),
         url: r.url.clone(),
         eligible: Eligibility {
             retry: managed && (matches!(r.phase, Phase::Failed { .. }) || (matches!(r.phase, Phase::Blocked { .. }) && missing)),

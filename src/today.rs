@@ -49,6 +49,15 @@ pub fn valid_success<'a>(
     (s.day == local_day(now) && have == want && viewer.is_none_or(|v| v == s.viewer)).then_some(s)
 }
 
+/// Coluna/rótulo de início: `HH:MM` se `t` é de hoje, senão `dd/mm` (São Paulo).
+pub fn start_label(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
+    if local_day(t) == local_day(now) {
+        local_hm(t)
+    } else {
+        t.with_timezone(&Sao_Paulo).format("%d/%m").to_string()
+    }
+}
+
 /// Contador "Abertos 24h": soma dos repos do config. `–` sem nenhum resultado; `N?` se algum repo
 /// está sem resultado, com erro na última tentativa ou mais velho que 3 polls.
 pub fn opened_24h_label(my: &crate::state::MyPrs, repos: &[String], now: DateTime<Utc>, poll_secs: u64) -> String {
