@@ -59,7 +59,7 @@ pub fn render_at(state: &State, now: DateTime<Utc>, remove_grace: Duration, repo
             }
             _ => String::new(),
         };
-        let ci = match crate::ci::cell(r.ci.as_ref(), &r.observed_head_sha, now) {
+        let ci = match crate::ci::cell(r.ci.as_ref(), r.ci_head(), now) {
             c if c.is_empty() => String::new(),
             c => format!(" · CI {c}"),
         };
@@ -163,6 +163,17 @@ mod tests {
         let out = render_at(&s, now, Duration::minutes(15), &[], 60);
         assert!(out.contains("o/r#1  ana  PR 1  pronto · CI ✗ rspec · iniciado 11:32 claude"), "{out}");
         assert!(out.contains("o/r#2  ana  PR 2  pronto\n"), "{out}");
+    }
+
+    #[test]
+    fn status_ci_of_pr_out_of_queue_follows_remote_head() {
+        let now: DateTime<Utc> = "2026-10-13T15:00:00Z".parse().unwrap();
+        let mut s = State::default();
+        let mut rec = PrRecord::fixture("o/r", 1, "a", "antigo");
+        rec.remote = Remote::NotPending;
+        rec.ci = Some(crate::ci::Ci { sha: "novo".into(), state: crate::ci::CiState::Pending, failed_check: None, finished_at: None, observed_at: now });
+        s.insert(rec);
+        assert!(render_at(&s, now, Duration::minutes(15), &[], 60).contains(" · CI ◐"));
     }
 
     #[test]

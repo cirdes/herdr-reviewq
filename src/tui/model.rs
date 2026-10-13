@@ -295,7 +295,7 @@ fn row_of(r: &PrRecord, section: Section, state: &State, cfg: &ViewConfig, facts
         title: r.title.clone(),
         icon: icon(r),
         status,
-        ci: crate::ci::cell(r.ci.as_ref(), &r.observed_head_sha, now),
+        ci: crate::ci::cell(r.ci.as_ref(), r.ci_head(), now),
         started: r.work_started_at.map(|t| start_label(t, now)).unwrap_or_default(),
         url: r.url.clone(),
         eligible: Eligibility {
@@ -737,6 +737,21 @@ mod tests {
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
         assert!(v.header.errors.contains(&"meus PRs · o/r: boom".to_string()), "{:?}", v.header.errors);
         assert!(!v.header.errors.iter().any(|e| e.contains("x/y")));
+    }
+
+    #[test]
+    fn ci_of_pr_out_of_queue_follows_remote_head() {
+        // fora da fila (Saindo/Adotado), observed_head_sha para de atualizar; o CI coletado é do head
+        // remoto atual e é o dado mais novo que existe
+        let now = at("2026-10-13T15:00:00Z");
+        let mut r = rec(1, Phase::Ready);
+        r.ownership = Ownership::Adopted { reason: "x".into(), at: now };
+        r.remote = Remote::NotPending;
+        r.observed_head_sha = "antigo".into();
+        r.ci = Some(crate::ci::Ci { sha: "novo".into(), state: crate::ci::CiState::Failure, failed_check: Some("lint".into()), finished_at: None, observed_at: now });
+        let s = state_with(vec![r], now);
+        let v = build(Some(&s), &UiState::default(), &cfg(), now);
+        assert_eq!(v.row(&rid(1)).unwrap().ci, "✗ lint");
     }
 
     #[test]

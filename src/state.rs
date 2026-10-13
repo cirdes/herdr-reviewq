@@ -311,6 +311,18 @@ impl State {
     }
 }
 
+impl PrRecord {
+    /// Commit contra o qual o CI é conferido. Na fila, o head que a busca de reviews viu (head novo
+    /// sem CI novo vira `?`). Fora dela (Saindo/Adotado) `observed_head_sha` para de atualizar, e o
+    /// CI coletado, que é sempre do head remoto atual, é o dado mais novo que existe.
+    pub fn ci_head(&self) -> &str {
+        match (&self.remote, &self.ci) {
+            (Remote::Pending, _) | (_, None) => &self.observed_head_sha,
+            (_, Some(c)) => &c.sha,
+        }
+    }
+}
+
 #[cfg(test)]
 impl PrRecord {
     pub fn fixture(repo: &str, number: u64, head_ref: &str, sha: &str) -> Self {

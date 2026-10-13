@@ -104,7 +104,7 @@ commits(last: 1) { nodes { commit { oid statusCheckRollup {
 - Uma query por repo com aliases, um por registro do repo em `State.prs` (gerenciado ou adotado, inclusive em Saindo): `repository(owner, name) { p123: pullRequest(number: 123) { <fragmento> } ... }`, em lotes de até 20 PRs.
 - Cobre os PRs em Saindo e Adotados, que a busca de reviews não traz mais.
 - Lote com erro de transporte ou GraphQL: os registros daquele lote mantêm o `ci` anterior. PR que voltou nulo (fechado e apagado, sem acesso) também mantém.
-- O CI é sempre o do **head remoto** do PR (`headRefOid`). O painel só mostra o CI quando `ci.sha == observed_head_sha`. Se o head mudou e o CI novo ainda não chegou, mostra `?`, então um head novo nunca herda o verde do anterior. O worktree local pode estar em outro commit (adotado, update que falhou). O CI não diz nada sobre o conteúdo local.
+- O CI é sempre o do **head remoto** do PR (`headRefOid`). Para PRs na fila, o painel só mostra o CI quando `ci.sha == observed_head_sha`. Se o head mudou e o CI novo ainda não chegou, mostra `?`, então um head novo nunca herda o verde do anterior. Fora da fila (Saindo, Adotados), `observed_head_sha` para de atualizar, então vale o CI coletado, que é sempre do head remoto atual. O worktree local pode estar em outro commit (adotado, update que falhou). O CI não diz nada sobre o conteúdo local.
 
 ## Meus PRs
 
