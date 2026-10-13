@@ -131,6 +131,46 @@ pub struct PrRecord {
     /// Desde quando o PR não está mais pendente (carência antes da remoção).
     #[serde(default)]
     pub not_pending_since: Option<DateTime<Utc>>,
+    /// CI do head remoto do PR (metadado; nunca afeta o ciclo de reviews).
+    #[serde(default)]
+    pub ci: Option<crate::ci::Ci>,
+    /// Primeira coleta em que um agente (Claude/Codex) foi visto neste worktree.
+    #[serde(default)]
+    pub work_started_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub work_agent: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MyPr {
+    pub number: u64,
+    pub title: String,
+    pub url: String,
+    pub draft: bool,
+    pub created_at: DateTime<Utc>,
+    pub head_sha: String,
+    #[serde(default)]
+    pub ci: Option<crate::ci::Ci>,
+}
+
+/// Último resultado bom de meus PRs num repo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MyPrsRepo {
+    pub prs: Vec<MyPr>,
+    pub opened_24h: u64,
+    pub as_of: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MyPrs {
+    /// Conta dos dados abaixo; outra conta zera tudo antes de aplicar.
+    #[serde(default)]
+    pub viewer: Option<String>,
+    #[serde(default)]
+    pub repos: BTreeMap<String, MyPrsRepo>,
+    /// Erro da última tentativa por repo.
+    #[serde(default)]
+    pub errors: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -197,6 +237,8 @@ pub struct State {
     pub auth_error_notified: bool,
     #[serde(default)]
     pub reviews_today: ReviewsToday,
+    #[serde(default)]
+    pub my_prs: MyPrs,
 }
 
 fn cap<T>(v: &mut Vec<T>, max: usize) {
@@ -269,6 +311,18 @@ impl State {
     }
 }
 
+impl PrRecord {
+    /// Commit contra o qual o CI é conferido. Na fila, o head que a busca de reviews viu (head novo
+    /// sem CI novo vira `?`). Fora dela (Saindo/Adotado) `observed_head_sha` para de atualizar, e o
+    /// CI coletado, que é sempre do head remoto atual, é o dado mais novo que existe.
+    pub fn ci_head(&self) -> &str {
+        match (&self.remote, &self.ci) {
+            (Remote::Pending, _) | (_, None) => &self.observed_head_sha,
+            (_, Some(c)) => &c.sha,
+        }
+    }
+}
+
 #[cfg(test)]
 impl PrRecord {
     pub fn fixture(repo: &str, number: u64, head_ref: &str, sha: &str) -> Self {
@@ -295,6 +349,9 @@ impl PrRecord {
             notify_pending: false,
             warning: None,
             not_pending_since: None,
+            ci: None,
+            work_started_at: None,
+            work_agent: None,
         }
     }
 }
@@ -310,6 +367,77 @@ mod tests {
         assert_eq!(PrKey::parse("acme/app#42"), Some(k));
         assert_eq!(PrKey::parse("sem-numero"), None);
         assert_eq!(PrKey::parse("a/b#x"), None);
+    }
+
+    fn sample_ci() -> crate::ci::Ci {
+        crate::ci::Ci {
+            sha: "abc".into(),
+            state: crate::ci::CiState::Failure,
+            failed_check: Some("rspec".into()),
+            finished_at: Some("2026-10-13T14:00:00Z".parse().unwrap()),
+            observed_at: "2026-10-13T14:01:00Z".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn old_state_without_new_fields_loads() {
+        let mut s = State::default();
+        s.insert(PrRecord::fixture("o/r", 1, "feat/x", "abc"));
+        let mut v = serde_json::to_value(&s).unwrap();
+        let rec = v["prs"]["o/r#1"].as_object_mut().unwrap();
+        for k in ["ci", "work_started_at", "work_agent"] {
+            assert!(rec.remove(k).is_some(), "campo {k} deveria existir");
+        }
+        v.as_object_mut().unwrap().remove("my_prs").expect("my_prs deveria existir");
+        let loaded: State = serde_json::from_value(v).unwrap();
+        let r = loaded.get(&PrKey::new("o/r", 1)).unwrap();
+        assert_eq!((r.ci.clone(), r.work_started_at, r.work_agent.clone()), (None, None, None));
+        assert_eq!(loaded.my_prs, MyPrs::default());
+    }
+
+    #[test]
+    fn new_fields_roundtrip() {
+        let mut s = State::default();
+        let mut rec = PrRecord::fixture("o/r", 1, "feat/x", "abc");
+        rec.ci = Some(sample_ci());
+        rec.work_started_at = Some("2026-10-13T14:32:00Z".parse().unwrap());
+        rec.work_agent = Some("claude".into());
+        s.insert(rec);
+        s.my_prs.viewer = Some("cirdes".into());
+        s.my_prs.errors.insert("o/x".into(), "boom".into());
+        s.my_prs.repos.insert(
+            "o/r".into(),
+            MyPrsRepo {
+                prs: vec![MyPr {
+                    number: 9,
+                    title: "Meu".into(),
+                    url: "https://github.com/o/r/pull/9".into(),
+                    draft: true,
+                    created_at: "2026-10-13T10:00:00Z".parse().unwrap(),
+                    head_sha: "abc".into(),
+                    ci: Some(sample_ci()),
+                }],
+                opened_24h: 2,
+                as_of: "2026-10-13T14:00:00Z".parse().unwrap(),
+            },
+        );
+        let back: State = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back, s);
+    }
+
+    #[test]
+    fn unknown_ci_state_does_not_isolate_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.json");
+        let mut s = State::default();
+        let mut rec = PrRecord::fixture("o/r", 1, "feat/x", "abc");
+        rec.ci = Some(sample_ci());
+        s.insert(rec);
+        let text = serde_json::to_string(&s).unwrap().replace(r#""state":"failure""#, r#""state":"novo""#);
+        std::fs::write(&path, text).unwrap();
+        let (loaded, corrupt) = State::load(&path).unwrap();
+        assert!(corrupt.is_none());
+        assert_eq!(loaded.get(&PrKey::new("o/r", 1)).unwrap().ci.as_ref().unwrap().state, crate::ci::CiState::Unknown);
     }
 
     #[test]

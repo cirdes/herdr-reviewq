@@ -88,11 +88,11 @@ fn main() -> Result<()> {
         Command::Daemon => daemon::run(paths),
         Command::Status => {
             let state = State::read(&paths.state_file())?;
-            let (grace, repos) = match Config::load(&paths.config_file, &paths.home) {
-                Ok(c) => (c.remove_grace_secs, c.repos.iter().map(|r| r.name.clone()).collect::<Vec<_>>()),
-                Err(_) => (DEFAULT_REMOVE_GRACE_SECS, Vec::new()),
+            let (grace, repos, poll) = match Config::load(&paths.config_file, &paths.home) {
+                Ok(c) => (c.remove_grace_secs, c.repos.iter().map(|r| r.name.clone()).collect::<Vec<_>>(), c.poll_interval_secs),
+                Err(_) => (DEFAULT_REMOVE_GRACE_SECS, Vec::new(), 60),
             };
-            print!("{}", status::render_at(&state, chrono::Utc::now(), grace_duration(grace), &repos));
+            print!("{}", status::render_at(&state, chrono::Utc::now(), grace_duration(grace), &repos, poll));
             Ok(())
         }
         Command::Request { kind, pr } => {

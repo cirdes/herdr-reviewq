@@ -5,7 +5,7 @@ use crate::requests;
 use crate::runner::{Cmd, RealRunner, Runner};
 use crate::state::{PrKey, State};
 use crate::tui::keys::{handle, Action, Key};
-use crate::tui::model::{reselect, Sent, UiFacts, UiState, View, ViewConfig};
+use crate::tui::model::{reselect, RowId, Sent, UiFacts, UiState, View, ViewConfig};
 use crate::ui::UI_CALL_TIMEOUT;
 use anyhow::{bail, Result};
 use crossterm::event::{
@@ -223,7 +223,11 @@ fn guarded(f: impl FnOnce() -> String) -> String {
 /// Uma ação do worker. Relê o estado do disco antes de agir (o snapshot do loop pode estar velho):
 /// o PR tem de continuar no painel, e URL e log saem do registro relido.
 fn perform(action: &Action, ctx: &WorkerCtx) -> String {
-    let (Action::Focus(key) | Action::OpenUrl(key, _) | Action::ShowLog(key)) = action else { return String::new() };
+    let key = match action {
+        Action::Focus(key) | Action::ShowLog(key) => key,
+        Action::OpenUrl(id, _) => id.key(),
+        _ => return String::new(),
+    };
     let state = match State::read(&ctx.paths.state_file()) {
         Ok(s) => s,
         Err(e) => return format!("não consegui ler o estado: {e:#}"),
@@ -234,9 +238,19 @@ fn perform(action: &Action, ctx: &WorkerCtx) -> String {
             Err(e) => format!("{e:#}"),
         };
     }
-    let Some(rec) = state.get(key) else { return format!("{key} não está mais no painel") };
+    // cada linha procura na sua coleção: um meu PR nunca resolve para um registro de review
+    let url = match action {
+        Action::OpenUrl(RowId::Mine(k), _) => state
+            .my_prs
+            .repos
+            .get(&k.repo)
+            .and_then(|m| m.prs.iter().find(|p| p.number == k.number))
+            .map(|p| p.url.clone()),
+        _ => state.get(key).map(|r| r.url.clone()),
+    };
+    let Some(url) = url else { return format!("{key} não está mais no painel") };
     if let Action::OpenUrl(..) = action {
-        let url = &rec.url;
+        let url = &url;
         let opened = ctx
             .runner
             .run(&Cmd::new("open").arg(url.clone()).timeout(UI_CALL_TIMEOUT))
@@ -245,7 +259,7 @@ fn perform(action: &Action, ctx: &WorkerCtx) -> String {
         let head = if opened { "abrindo no navegador desta máquina" } else { "não consegui abrir o navegador" };
         return format!("{head} · URL enviada ao clipboard do terminal: {url}");
     }
-    let log = ctx.paths.setup_log(&rec.key);
+    let log = ctx.paths.setup_log(key);
     if !log.exists() {
         return "sem log ainda".into();
     }
@@ -609,6 +623,7 @@ pub fn run(paths: Paths, cfg: Config) -> Result<Exit> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::model::RowId;
     use crate::herdr::FakeHerdr;
     use crate::runner::{FakeRunner, Output};
     use crate::state::{Phase, PrKey, PrRecord};
@@ -737,7 +752,7 @@ mod tests {
         runner.on(&format!("open {url}"), Output::fail(1, "sem navegador"));
         let ctx = WorkerCtx { herdr: &h, runner: &runner, cfg: &fx.cfg, paths: &fx.paths, routing: routing(), pane: None };
         // a URL vem do estado relido, não da que a tecla carregou
-        let action = Action::OpenUrl(PrKey::new("o/r", 7), "https://velha".into());
+        let action = Action::OpenUrl(RowId::Review(PrKey::new("o/r", 7)), "https://velha".into());
         let ok = perform(&action, &ctx);
         let bad = perform(&action, &ctx);
         for m in [&ok, &bad] {
@@ -759,15 +774,49 @@ mod tests {
         let log = fx.paths.setup_log(&gone);
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(&log, "ok").unwrap();
-        let m = perform(&Action::OpenUrl(gone.clone(), "https://github.com/o/r/pull/8".into()), &ctx);
+        let m = perform(&Action::OpenUrl(RowId::Review(gone.clone()), "https://github.com/o/r/pull/8".into()), &ctx);
         assert!(m.contains("não está mais no painel"), "{m}");
         let m = perform(&Action::ShowLog(gone), &ctx);
         assert!(m.contains("não está mais no painel"), "{m}");
         assert!(runner.calls.borrow().is_empty(), "PR sumido: nada roda");
 
         std::fs::write(fx.paths.state_file(), "{lixo").unwrap();
-        let m = perform(&Action::OpenUrl(PrKey::new("o/r", 7), "x".into()), &ctx);
+        let m = perform(&Action::OpenUrl(RowId::Review(PrKey::new("o/r", 7)), "x".into()), &ctx);
         assert!(m.contains("estado"), "{m}");
+    }
+
+    #[test]
+    fn open_url_mine_rereads_my_prs_and_refuses_vanished() {
+        let fx = fx();
+        let mut s = State::default();
+        s.my_prs.repos.insert(
+            "o/r".into(),
+            crate::state::MyPrsRepo {
+                prs: vec![crate::state::MyPr {
+                    number: 9,
+                    title: "Meu".into(),
+                    url: "https://github.com/o/r/pull/9".into(),
+                    draft: false,
+                    created_at: chrono::Utc::now(),
+                    head_sha: "m".into(),
+                    ci: None,
+                }],
+                opened_24h: 1,
+                as_of: chrono::Utc::now(),
+            },
+        );
+        s.save(&fx.paths.state_file()).unwrap();
+        let h = FakeHerdr::new();
+        let runner = FakeRunner::new();
+        runner.on("open https://github.com/o/r/pull/9", Output::ok(""));
+        let ctx = WorkerCtx { herdr: &h, runner: &runner, cfg: &fx.cfg, paths: &fx.paths, routing: routing(), pane: None };
+        let m = perform(&Action::OpenUrl(RowId::Mine(PrKey::new("o/r", 9)), "https://velha".into()), &ctx);
+        assert!(m.contains("abrindo") && m.contains("https://github.com/o/r/pull/9"), "{m}");
+        let m = perform(&Action::OpenUrl(RowId::Mine(PrKey::new("o/r", 8)), "x".into()), &ctx);
+        assert!(m.contains("não está mais no painel"), "{m}");
+        // o mesmo número como review não existe: Mine não cai em State.prs
+        let m = perform(&Action::OpenUrl(RowId::Review(PrKey::new("o/r", 9)), "x".into()), &ctx);
+        assert!(m.contains("não está mais no painel"), "{m}");
     }
 
     #[test]
@@ -870,13 +919,42 @@ mod tests {
         assert!(now - t0 >= STOP_GRACE, "{:?}", now - t0);
     }
 
-    #[test]
-    fn tty_probe_sees_hangup_and_bad_fd() {
+    /// Pty com CLOEXEC nos dois lados. O openpty não marca: um processo disparado em paralelo por
+    /// outro teste herdaria o mestre e o manteria aberto depois do `exec`, e o pty nunca "desligaria".
+    fn cloexec_pty() -> (libc::c_int, libc::c_int) {
         let (mut master, mut slave) = (0, 0);
         let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
         assert_eq!(rc, 0);
+        unsafe {
+            libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+            libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        (master, slave)
+    }
+
+    /// Escravo de um pty cujo mestre fechou. Ainda há uma janela entre o openpty e o CLOEXEC em que
+    /// um fork herda o mestre; nesse caso tenta de novo.
+    fn hung_up_slave() -> libc::c_int {
+        for _ in 0..20 {
+            let (master, slave) = cloexec_pty();
+            unsafe { libc::close(master) };
+            if tty_gone(slave) {
+                return slave;
+            }
+            unsafe { libc::close(slave) };
+        }
+        panic!("mestre fechado: o terminal sumiu");
+    }
+
+    #[test]
+    fn tty_probe_sees_hangup_and_bad_fd() {
+        let (master, slave) = cloexec_pty();
         assert!(!tty_gone(slave), "pty aberto: vivo");
-        unsafe { libc::close(master) };
+        unsafe {
+            libc::close(master);
+            libc::close(slave);
+        }
+        let slave = hung_up_slave();
         assert!(tty_gone(slave), "mestre fechado: o terminal sumiu");
         unsafe { libc::close(slave) };
         // fd que nunca existiu (um número baixo poderia ser reaberto por outro teste em paralelo)
@@ -949,11 +1027,7 @@ mod tests {
         use std::os::fd::FromRawFd;
         let fx = fx();
         let log = fx.paths.tui_log_file();
-        let (mut master, mut slave) = (0, 0);
-        let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(rc, 0);
-        unsafe { libc::close(master) };
-        let mut tty = unsafe { std::fs::File::from_raw_fd(slave) };
+        let mut tty = unsafe { std::fs::File::from_raw_fd(hung_up_slave()) };
         assert!(std::io::Write::write_all(&mut tty, b"x\n").is_err(), "pty sem mestre: a escrita falha");
         report_exit(&log, &mut tty, "sinal recebido e o loop não saiu em 1 s");
         let text = std::fs::read_to_string(&log).unwrap();

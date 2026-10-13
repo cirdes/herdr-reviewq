@@ -79,7 +79,13 @@ pub struct Daemon<'a> {
     pub(crate) panel_backoff: Duration,
     /// Já rodou um tick nesta execução (no primeiro, o painel vem antes do poll).
     ticked: bool,
+    last_extras: Option<Instant>,
+    /// Sync pedido: coleta os extras no próximo tick, fora da cadência.
+    pub(crate) extras_requested: bool,
 }
+
+/// Prazo total da coleta de extras (agentes, CI e meus PRs) num tick.
+const EXTRAS_BUDGET: Duration = Duration::from_secs(30);
 
 /// Linha do log quando o painel fica de pé; registra a recuperação depois de falhas.
 fn panel_ok_message(failures: u32) -> String {
@@ -118,6 +124,8 @@ impl<'a> Daemon<'a> {
             panel_next_try: None,
             panel_backoff: Duration::from_secs(30),
             ticked: false,
+            last_extras: None,
+            extras_requested: false,
         };
         d.recover_orphan_setup();
         if let Err(e) = d.save() {
@@ -217,6 +225,7 @@ impl<'a> Daemon<'a> {
         self.drive_setup();
         self.deliver_notifications();
         self.maybe_collect_reviews_today();
+        self.maybe_collect_extras();
         self.maybe_ensure_panel();
     }
 
@@ -408,6 +417,95 @@ impl<'a> Daemon<'a> {
         }
         self.counter_requested = false;
         self.collect_reviews_today_at(now);
+    }
+
+    fn maybe_collect_extras(&mut self) {
+        let due = self.last_extras.is_none_or(|t| t.elapsed() >= Duration::from_secs(self.cfg.poll_interval_secs));
+        if stopping() || !(due || self.extras_requested) {
+            return;
+        }
+        self.extras_requested = false;
+        self.last_extras = Some(Instant::now());
+        self.collect_extras_with(Utc::now(), &stopping);
+    }
+
+    /// Agentes, CI e meus PRs. Roda fora do ciclo de reviews e só escreve metadados: trabalha numa
+    /// cópia e, no fim, copia de volta apenas `ci`, `work_started_at`, `work_agent` e `my_prs`.
+    /// Encerramento no meio descarta tudo; falhas ficam no próprio dado e no log.
+    pub(crate) fn collect_extras_with(&mut self, now: DateTime<Utc>, stop: &dyn Fn() -> bool) {
+        if stop() {
+            return;
+        }
+        let deadline = Instant::now() + EXTRAS_BUDGET;
+        let mut next = self.state.clone();
+        match self.herdr.list_agents(deadline) {
+            Ok(agents) => {
+                for k in crate::agents::apply_agents(&mut next, &agents, now) {
+                    info(&format!("{k}: agente aberto no worktree"));
+                }
+            }
+            Err(e) => info(&format!("agentes do herdr: {e:#}")),
+        }
+        let repos: Vec<String> = self.cfg.repos.iter().map(|r| r.name.clone()).collect();
+        for repo in &repos {
+            if stop() {
+                return;
+            }
+            let numbers: Vec<u64> = next.prs.values().filter(|r| &r.key.repo == repo).map(|r| r.key.number).collect();
+            if numbers.is_empty() {
+                continue;
+            }
+            for (n, ci) in crate::github_extras::fetch_review_ci(self.runner, repo, &numbers, now, deadline, stop) {
+                if let Some(r) = next.get_mut(&PrKey::new(repo, n)) {
+                    r.ci = Some(ci);
+                }
+            }
+        }
+        if stop() {
+            return;
+        }
+        let my = &mut next.my_prs;
+        my.repos.retain(|k, _| repos.contains(k));
+        my.errors.retain(|k, _| repos.contains(k));
+        match github::fetch_viewer(self.runner, deadline) {
+            Err(e) => info(&format!("meus PRs: viewer: {}", e.message)),
+            Ok(viewer) => {
+                if my.viewer.as_deref() != Some(viewer.as_str()) {
+                    // outra conta: nada da anterior pode sobrar, mesmo que os repos falhem agora
+                    *my = crate::state::MyPrs { viewer: Some(viewer.clone()), ..Default::default() };
+                }
+                let since = now - chrono::Duration::hours(24);
+                for repo in &repos {
+                    if stop() {
+                        return;
+                    }
+                    match crate::github_extras::fetch_my_prs(self.runner, repo, &viewer, since, now, deadline, stop) {
+                        Ok(r) => {
+                            my.errors.remove(repo);
+                            my.repos.insert(repo.clone(), crate::state::MyPrsRepo { prs: r.prs, opened_24h: r.opened_24h, as_of: now });
+                        }
+                        Err(e) => {
+                            info(&format!("meus PRs em {repo}: {}", e.message));
+                            my.errors.insert(repo.clone(), e.message);
+                        }
+                    }
+                }
+            }
+        }
+        if stop() {
+            return;
+        }
+        for (k, rec) in self.state.prs.iter_mut() {
+            if let Some(n) = next.prs.get(k) {
+                rec.ci = n.ci.clone();
+                rec.work_started_at = n.work_started_at;
+                rec.work_agent = n.work_agent.clone();
+            }
+        }
+        self.state.my_prs = next.my_prs;
+        if let Err(e) = self.save() {
+            info(&format!("{e:#}"));
+        }
     }
 
     #[cfg(test)]
@@ -615,6 +713,7 @@ impl<'a> Daemon<'a> {
                         }
                         if ok && req.kind == RequestKind::Sync {
                             self.counter_requested = true;
+                            self.extras_requested = true;
                         }
                         info(&format!("pedido {:?} {:?}: {message}", req.kind, req.pr));
                         let result = RequestResult {
@@ -700,6 +799,9 @@ impl<'a> Daemon<'a> {
                             rec.created_branch = false;
                         }
                         rec.phase = Phase::Creating;
+                        // o início pertence ao worktree físico, que vai ser recriado
+                        rec.work_started_at = None;
+                        rec.work_agent = None;
                         rec.managed_sha = None;
                         rec.prepared_sha = None;
                         rec.workspace_id = None;
@@ -1124,8 +1226,9 @@ mod tests {
             requests::write(&paths.requests_dir(), RequestKind::Sync, None).unwrap();
         }
         d.tick();
-        let viewer_calls = runner.gh.lines().iter().filter(|l| l.ends_with("query={ viewer { login } }")).count();
-        assert_eq!(viewer_calls, 1, "{:?}", runner.gh.lines());
+        // os extras também consultam o viewer; o que importa é o contador coletar uma vez só
+        let counter_calls = runner.gh.lines().iter().filter(|l| l.contains("reviewed-by:cirdes")).count();
+        assert_eq!(counter_calls, 1, "{:?}", runner.gh.lines());
         assert!(!d.counter_requested);
     }
 
@@ -1495,5 +1598,258 @@ mod tests {
         assert_eq!(rec.phase, Phase::Ready);
         assert!(rec.not_pending_since.is_some());
         assert!(rec.path.exists());
+    }
+
+    // ---- extras: agentes, CI e meus PRs ----
+
+    fn ci_json(n: u64, sha: &str, state: &str) -> String {
+        serde_json::json!({"data": {"repository": {format!("p{n}"): {"headRefOid": sha, "commits": {"nodes": [{"commit": {"oid": sha,
+            "statusCheckRollup": {"state": state, "contexts": {"pageInfo": {"hasNextPage": false}, "nodes": []}}}}]}}}}})
+        .to_string()
+    }
+
+    fn mine_json(numbers: &[u64]) -> String {
+        let nodes: Vec<serde_json::Value> = numbers
+            .iter()
+            .map(|n| {
+                serde_json::json!({"__typename": "PullRequest", "number": n, "title": format!("Meu {n}"),
+                    "url": format!("https://github.com/o/r/pull/{n}"), "isDraft": false, "createdAt": "2026-10-13T10:00:00Z",
+                    "headRefOid": "m", "commits": {"nodes": []}})
+            })
+            .collect();
+        serde_json::json!({"data": {"repository": {"id": "R"}, "search": {"issueCount": nodes.len(),
+            "pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes}}})
+        .to_string()
+    }
+
+    fn count_json(n: u64) -> String {
+        serde_json::json!({"data": {"search": {"issueCount": n}}}).to_string()
+    }
+
+    fn extras_now() -> DateTime<Utc> {
+        "2026-10-13T15:00:00Z".parse().unwrap()
+    }
+
+    fn no_stop() -> bool {
+        false
+    }
+
+    fn mine_repo(numbers: &[u64]) -> crate::state::MyPrsRepo {
+        crate::state::MyPrsRepo {
+            prs: numbers
+                .iter()
+                .map(|n| crate::state::MyPr {
+                    number: *n,
+                    title: format!("Antigo {n}"),
+                    url: String::new(),
+                    draft: false,
+                    created_at: extras_now(),
+                    head_sha: "x".into(),
+                    ci: None,
+                })
+                .collect(),
+            opened_24h: 1,
+            as_of: extras_now() - chrono::Duration::hours(1),
+        }
+    }
+
+    #[test]
+    fn extras_mark_agent_ci_and_my_prs() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        runner.gh.on("p7: pullRequest", Output::ok(&ci_json(7, "s7", "SUCCESS")));
+        runner.gh.on("query={ viewer { login } }", Output::ok(VIEWER));
+        runner.gh.on("is:open author:cirdes", Output::ok(&mine_json(&[40, 41])));
+        runner.gh.on("created:>=2026-10-12T15:00:00Z", Output::ok(&count_json(2)));
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths.clone(), config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        let rec = crate::state::PrRecord::fixture("o/r", 7, "feat/x", "s7");
+        herdr.agents.borrow_mut().push(crate::herdr::AgentInfo {
+            agent: "codex".into(),
+            cwd: Some(rec.path.join("src")),
+            foreground_cwd: None,
+        });
+        d.state.insert(rec);
+        d.collect_extras_with(extras_now(), &no_stop);
+        let r = d.state.get(&PrKey::new("o/r", 7)).unwrap();
+        assert_eq!(r.work_started_at, Some(extras_now()));
+        assert_eq!(r.work_agent.as_deref(), Some("codex"));
+        assert_eq!(r.ci.as_ref().unwrap().state, crate::ci::CiState::Success);
+        assert_eq!(d.state.my_prs.viewer.as_deref(), Some("cirdes"));
+        let mine = &d.state.my_prs.repos["o/r"];
+        assert_eq!(mine.prs.iter().map(|p| p.number).collect::<Vec<_>>(), vec![40, 41]);
+        assert_eq!(mine.opened_24h, 2);
+        assert_eq!(mine.as_of, extras_now());
+        assert!(d.state.my_prs.errors.is_empty());
+        assert_eq!(State::read(&paths.state_file()).unwrap(), d.state, "grava no fim");
+    }
+
+    #[test]
+    fn extras_failure_does_not_touch_review_flow() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() }; // nenhuma regra: todo gh falha
+        let herdr = FakeHerdr::new();
+        herdr.fail_agents.set(true);
+        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        d.state.insert(crate::state::PrRecord::fixture("o/r", 7, "feat/x", "s7"));
+        let mut leaving = crate::state::PrRecord::fixture("o/r", 8, "feat/y", "s8");
+        leaving.remote = crate::state::Remote::NotPending;
+        leaving.not_pending_since = Some(extras_now() - chrono::Duration::minutes(5));
+        leaving.notify_pending = true;
+        d.state.insert(leaving);
+        d.state.my_prs.viewer = Some("cirdes".into());
+        d.state.my_prs.repos.insert("o/r".into(), mine_repo(&[1]));
+        let before = d.state.clone();
+        d.collect_extras_with(extras_now(), &no_stop);
+        // o estado que a reconciliação recebe é idêntico: mesmas operações, carência e notificações
+        assert_eq!(d.state, before);
+    }
+
+    #[test]
+    fn extras_success_changes_only_metadata() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        runner.gh.on("p7: pullRequest", Output::ok(&ci_json(7, "s7", "FAILURE")));
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        let mut rec = crate::state::PrRecord::fixture("o/r", 7, "feat/x", "s7");
+        rec.generation = 3;
+        herdr.agents.borrow_mut().push(crate::herdr::AgentInfo { agent: "claude".into(), cwd: Some(rec.path.clone()), foreground_cwd: None });
+        d.state.insert(rec);
+        let before = d.state.clone();
+        d.collect_extras_with(extras_now(), &no_stop);
+        let mut after = d.state.clone();
+        let r = after.get_mut(&PrKey::new("o/r", 7)).unwrap();
+        assert!(r.ci.is_some() && r.work_started_at.is_some());
+        (r.ci, r.work_started_at, r.work_agent) = (None, None, None);
+        after.my_prs = before.my_prs.clone();
+        assert_eq!(after, before, "fora os metadados, nada muda (generation inclusive)");
+    }
+
+    #[test]
+    fn viewer_change_clears_before_apply_even_if_repo_fails() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        runner.gh.on("query={ viewer { login } }", Output::ok(VIEWER));
+        runner.gh.on("is:open author:cirdes", Output::fail(1, "boom"));
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        d.state.my_prs.viewer = Some("ana".into());
+        d.state.my_prs.repos.insert("o/r".into(), mine_repo(&[1]));
+        d.collect_extras_with(extras_now(), &no_stop);
+        assert_eq!(d.state.my_prs.viewer.as_deref(), Some("cirdes"));
+        assert!(d.state.my_prs.repos.is_empty(), "PRs da conta antiga não podem sobrar");
+        assert!(d.state.my_prs.errors["o/r"].contains("boom"));
+    }
+
+    #[test]
+    fn viewer_failure_keeps_my_prs() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        d.state.my_prs.viewer = Some("cirdes".into());
+        d.state.my_prs.repos.insert("o/r".into(), mine_repo(&[1]));
+        let before = d.state.my_prs.clone();
+        d.collect_extras_with(extras_now(), &no_stop);
+        assert_eq!(d.state.my_prs, before);
+    }
+
+    #[test]
+    fn failed_repo_keeps_previous_my_prs_and_records_error() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        runner.gh.on("query={ viewer { login } }", Output::ok(VIEWER));
+        runner.gh.on("is:open author:cirdes", Output::fail(1, "boom"));
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        d.state.my_prs.viewer = Some("cirdes".into());
+        d.state.my_prs.repos.insert("o/r".into(), mine_repo(&[1]));
+        d.collect_extras_with(extras_now(), &no_stop);
+        assert_eq!(d.state.my_prs.repos["o/r"], mine_repo(&[1]));
+        assert!(d.state.my_prs.errors["o/r"].contains("boom"));
+    }
+
+    #[test]
+    fn repo_removed_from_config_is_pruned() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        runner.gh.on("query={ viewer { login } }", Output::ok(VIEWER));
+        runner.gh.on("is:open author:cirdes", Output::ok(&mine_json(&[])));
+        runner.gh.on("created:>=", Output::ok(&count_json(0)));
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        d.state.my_prs.viewer = Some("cirdes".into());
+        d.state.my_prs.repos.insert("x/y".into(), mine_repo(&[1]));
+        d.state.my_prs.errors.insert("x/y".into(), "velho".into());
+        d.collect_extras_with(extras_now(), &no_stop);
+        assert_eq!(d.state.my_prs.repos.keys().collect::<Vec<_>>(), vec!["o/r"]);
+        assert!(d.state.my_prs.errors.is_empty());
+    }
+
+    #[test]
+    fn cancelled_extras_write_nothing() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        let rec = crate::state::PrRecord::fixture("o/r", 7, "feat/x", "s7");
+        herdr.agents.borrow_mut().push(crate::herdr::AgentInfo { agent: "claude".into(), cwd: Some(rec.path.clone()), foreground_cwd: None });
+        d.state.insert(rec);
+        let before = d.state.clone();
+        d.collect_extras_with(extras_now(), &|| true);
+        assert_eq!(d.state, before);
+        assert!(runner.gh.lines().is_empty());
+    }
+
+    #[test]
+    fn retry_recreate_clears_work_but_setup_retry_keeps() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths.clone(), config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        let mut gone = crate::state::PrRecord::fixture("o/r", 5, "feat/x", "s");
+        gone.path = fx.root.join("nao-existe");
+        gone.created_branch = false;
+        gone.phase = Phase::Blocked { reason: "worktree sumiu".into() };
+        gone.work_started_at = Some(extras_now());
+        gone.work_agent = Some("claude".into());
+        d.state.insert(gone);
+        let mut failed = crate::state::PrRecord::fixture("o/r", 6, "feat/x", "s");
+        failed.phase = Phase::Failed { step: "setup".into(), reason: "x".into() };
+        failed.work_started_at = Some(extras_now());
+        failed.work_agent = Some("codex".into());
+        d.state.insert(failed);
+        requests::write(&paths.requests_dir(), RequestKind::Retry, Some("o/r#5".into())).unwrap();
+        requests::write(&paths.requests_dir(), RequestKind::Retry, Some("o/r#6".into())).unwrap();
+        d.process_requests_for_test();
+        assert!(d.state.last_requests.iter().filter(|r| r.ok).count() == 2, "{:?}", d.state.last_requests);
+        let r5 = d.state.get(&PrKey::new("o/r", 5)).unwrap();
+        assert_eq!(r5.phase, Phase::Creating);
+        assert_eq!((r5.work_started_at, r5.work_agent.clone()), (None, None));
+        let r6 = d.state.get(&PrKey::new("o/r", 6)).unwrap();
+        assert_eq!(r6.work_agent.as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn sync_request_triggers_extras() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths.clone(), config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        assert!(!d.extras_requested);
+        requests::write(&paths.requests_dir(), RequestKind::Sync, None).unwrap();
+        d.process_requests_for_test();
+        assert!(d.extras_requested);
     }
 }

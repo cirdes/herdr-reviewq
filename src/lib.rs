@@ -1,10 +1,13 @@
+pub mod agents;
 pub mod applog;
+pub mod ci;
 pub mod config;
 pub mod daemon;
 pub mod executor;
 pub mod facts;
 pub mod git;
 pub mod github;
+pub mod github_extras;
 pub mod herdr;
 pub mod paths;
 pub mod reconcile;
