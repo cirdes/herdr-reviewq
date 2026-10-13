@@ -205,6 +205,9 @@ fn new_record(p: &PendingPr, input: &Input) -> PrRecord {
         notify_pending: false,
         warning: None,
         not_pending_since: None,
+        ci: None,
+        work_started_at: None,
+        work_agent: None,
     }
 }
 
