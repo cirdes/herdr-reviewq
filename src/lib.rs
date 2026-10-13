@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod applog;
 pub mod ci;
 pub mod config;

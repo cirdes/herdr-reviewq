@@ -34,6 +34,14 @@ pub struct PaneInfo {
     pub is_reviewq_tui: bool,
 }
 
+/// Agente detectado pelo herdr (`herdr agent list`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentInfo {
+    pub agent: String,
+    pub cwd: Option<PathBuf>,
+    pub foreground_cwd: Option<PathBuf>,
+}
+
 pub const PLUGIN_ID: &str = "cirdes.reviewq";
 /// Nome do binário cujo `tui` identifica o pane do painel.
 const TUI_BIN: &str = "herdr-reviewq";
@@ -79,6 +87,8 @@ pub trait Herdr {
     /// Abre o TUI do plugin ancorado em `target_pane` (que pertence a `workspace`).
     /// Atenção: o herdr muda o foco para o workspace do pane, mesmo com `--no-focus`.
     fn open_plugin_pane(&self, workspace: &str, target_pane: &str, deadline: Instant) -> Result<()>;
+    /// Agentes que o herdr reconhece na sessão (Claude, Codex…), com o diretório de cada um.
+    fn list_agents(&self, deadline: Instant) -> Result<Vec<AgentInfo>>;
 }
 
 pub struct HerdrCli<'a> {
@@ -332,6 +342,11 @@ impl Herdr for HerdrCli<'_> {
         )
         .map(|_| ())
     }
+
+    fn list_agents(&self, deadline: Instant) -> Result<Vec<AgentInfo>> {
+        let res = self.call(self.cmd().args(["agent", "list"]).timeout(self.until(deadline)?))?;
+        Ok(crate::agents::parse_agents(&res))
+    }
 }
 
 /// Dublê para testes: cria/remove worktrees com git de verdade, sem `--force`.
@@ -363,6 +378,9 @@ pub struct FakeHerdr {
     pub open_steals_focus: std::cell::Cell<bool>,
     /// Demora de cada `process-info` simulado em `list_panes`.
     pub pane_scan_delay: std::cell::Cell<Duration>,
+    /// Resposta de `list_agents`.
+    pub agents: std::cell::RefCell<Vec<AgentInfo>>,
+    pub fail_agents: std::cell::Cell<bool>,
     next: std::cell::Cell<u32>,
 }
 
@@ -394,6 +412,8 @@ impl FakeHerdr {
             tui_starts_dead: Default::default(),
             open_steals_focus: std::cell::Cell::new(true),
             pane_scan_delay: Default::default(),
+            agents: Default::default(),
+            fail_agents: Default::default(),
             next: std::cell::Cell::new(1),
         }
     }
@@ -517,6 +537,12 @@ impl Herdr for FakeHerdr {
             *self.focused.borrow_mut() = Some(workspace.into());
         }
         Ok(())
+    }
+
+    fn list_agents(&self, deadline: Instant) -> Result<Vec<AgentInfo>> {
+        Self::before(deadline)?;
+        self.check("agent list", self.fail_agents.get())?;
+        Ok(self.agents.borrow().clone())
     }
 }
 
