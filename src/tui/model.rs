@@ -46,10 +46,10 @@ impl RowId {
 pub enum Section {
     Started,
     Pending,
+    Mine,
+    Adopted,
     NoSync,
     Leaving,
-    Adopted,
-    Mine,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -443,7 +443,7 @@ mod tests {
         let order: Vec<(u64, Section)> = v.rows.iter().map(|r| (r.id.key().number, r.section)).collect();
         assert_eq!(order, vec![
             (2, Section::Pending), (3, Section::Pending), (1, Section::Pending),
-            (6, Section::NoSync), (8, Section::NoSync), (4, Section::Leaving), (7, Section::Leaving), (5, Section::Adopted)]);
+            (5, Section::Adopted), (6, Section::NoSync), (8, Section::NoSync), (4, Section::Leaving), (7, Section::Leaving)]);
         assert!(v.row(&rid(4)).unwrap().status.contains("sai em 12min"));
         let paused = &v.row(&rid(8)).unwrap().status;
         assert!(paused.contains("carência pausada: sem sync") && paused.contains("GitHub sem sync desde"), "{paused}");
@@ -622,7 +622,7 @@ mod tests {
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
         let order: Vec<(RowId, Section)> = v.rows.iter().map(|r| (r.id.clone(), r.section)).collect();
         assert_eq!(order, vec![
-            (rid(2), Section::Started), (rid(1), Section::Pending), (rid(5), Section::Adopted), (mid(9), Section::Mine)]);
+            (rid(2), Section::Started), (rid(1), Section::Pending), (mid(9), Section::Mine), (rid(5), Section::Adopted)]);
     }
 
     #[test]
