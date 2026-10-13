@@ -15,8 +15,8 @@ pub enum Key {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Focus(PrKey),
-    /// PR e a URL vista na tela (copiada na hora); o worker relê a URL do estado.
-    OpenUrl(PrKey, String),
+    /// Linha e a URL vista na tela (copiada na hora); o worker relê a URL do estado.
+    OpenUrl(RowId, String),
     ShowLog(PrKey),
     Request(RequestKind, Option<PrKey>),
     Quit,
@@ -95,20 +95,29 @@ pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) 
         Key::Char('s') => (next, Some(Action::Request(RequestKind::Sync, None))),
         _ => {
             let Some(row) = selected else { return (next, None) };
+            let Some(key_pr) = row.id.review() else {
+                // meus PRs: só abrir no navegador
+                match key {
+                    Key::Enter | Key::Char('o') => return (next, Some(Action::OpenUrl(row.id.clone(), row.url.clone()))),
+                    Key::Char('l' | 'R' | 'a' | 'r') => next.message = Some("só para PRs de review".into()),
+                    _ => {}
+                }
+                return (next, None);
+            };
             match key {
-                Key::Enter if row.eligible.focus => (next, Some(Action::Focus(row.id.key().clone()))),
+                Key::Enter if row.eligible.focus => (next, Some(Action::Focus(key_pr.clone()))),
                 Key::Enter => {
                     next.message = Some("este PR está sendo criado ou removido".into());
                     (next, None)
                 }
-                Key::Char('o') => (next, Some(Action::OpenUrl(row.id.key().clone(), row.url.clone()))),
-                Key::Char('l') => (next, Some(Action::ShowLog(row.id.key().clone()))),
-                Key::Char('R') if row.eligible.retry => (next, Some(Action::Request(RequestKind::Retry, Some(row.id.key().clone())))),
+                Key::Char('o') => (next, Some(Action::OpenUrl(row.id.clone(), row.url.clone()))),
+                Key::Char('l') if row.eligible.log => (next, Some(Action::ShowLog(key_pr.clone()))),
+                Key::Char('R') if row.eligible.retry => (next, Some(Action::Request(RequestKind::Retry, Some(key_pr.clone())))),
                 Key::Char('a') | Key::Char('r') => {
                     let kind = if key == Key::Char('a') { RequestKind::Adopt } else { RequestKind::Release };
                     if eligible(row, kind) {
                         // a confirmação é desenhada a partir de `confirm` (confirm_text), não de `message`
-                        next.confirm = Some((kind, row.id.key().clone()));
+                        next.confirm = Some((kind, key_pr.clone()));
                     } else {
                         next.message = Some(not_eligible_msg(kind).into());
                     }
@@ -139,6 +148,67 @@ mod tests {
             s.insert(r);
         }
         View::build(Some(&s), &UiState::default(), &ViewConfig { repos: vec!["o/r".into()], poll_interval_secs: 60, remove_grace: chrono::Duration::minutes(15) }, &UiFacts::default(), Utc::now())
+    }
+
+    fn view_with_mine(recs: Vec<PrRecord>, mine: &[u64]) -> View {
+        let mut s = State::default();
+        s.repos.insert("o/r".into(), RepoStatus { ok: true, last_sync: Some(Utc::now()), ..Default::default() });
+        for r in recs {
+            s.insert(r);
+        }
+        let prs = mine
+            .iter()
+            .map(|n| crate::state::MyPr {
+                number: *n,
+                title: format!("Meu {n}"),
+                url: format!("https://github.com/o/r/pull/{n}"),
+                draft: false,
+                created_at: Utc::now(),
+                head_sha: "m".into(),
+                ci: None,
+            })
+            .collect();
+        s.my_prs.repos.insert("o/r".into(), crate::state::MyPrsRepo { prs, opened_24h: 1, as_of: Utc::now() });
+        View::build(Some(&s), &UiState::default(), &ViewConfig { repos: vec!["o/r".into()], poll_interval_secs: 60, remove_grace: chrono::Duration::minutes(15) }, &UiFacts::default(), Utc::now())
+    }
+
+    fn mine_at(n: u64) -> UiState {
+        UiState { selected: Some(RowId::Mine(PrKey::new("o/r", n))), ..Default::default() }
+    }
+
+    #[test]
+    fn enter_and_o_on_mine_open_url() {
+        let v = view_with_mine(vec![PrRecord::fixture("o/r", 9, "x", "s")], &[9]);
+        let want = Action::OpenUrl(RowId::Mine(PrKey::new("o/r", 9)), "https://github.com/o/r/pull/9".into());
+        assert_eq!(handle(Key::Enter, &mine_at(9), &v).1, Some(want.clone()));
+        assert_eq!(handle(Key::Char('o'), &mine_at(9), &v).1, Some(want));
+    }
+
+    #[test]
+    fn log_retry_adopt_release_on_mine_do_nothing() {
+        let v = view_with_mine(vec![], &[9]);
+        for k in ['l', 'R', 'a', 'r'] {
+            let (ui, a) = handle(Key::Char(k), &mine_at(9), &v);
+            assert!(a.is_none(), "{k}");
+            assert!(ui.confirm.is_none(), "{k}");
+            assert!(ui.message.as_deref().unwrap_or("").contains("só para PRs de review"), "{k}: {:?}", ui.message);
+        }
+    }
+
+    #[test]
+    fn navigation_crosses_into_mine() {
+        let v = view_with_mine(vec![PrRecord::fixture("o/r", 1, "x", "s")], &[9]);
+        let (ui, _) = handle(Key::Down, &UiState::default(), &v);
+        assert_eq!(ui.selected, Some(RowId::Mine(PrKey::new("o/r", 9))));
+    }
+
+    #[test]
+    fn open_url_on_review_carries_review_id() {
+        let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s")]);
+        assert_eq!(
+            handle(Key::Char('o'), &UiState::default(), &v).1,
+            Some(Action::OpenUrl(RowId::Review(PrKey::new("o/r", 1)), "https://github.com/o/r/pull/1".into()))
+        );
     }
 
     fn adopted(n: u64) -> PrRecord {
