@@ -454,6 +454,45 @@ mod tests {
         let mut adopted = pr(4799, "voce", "feat: aprovação em lote de cadastros", Phase::Ready, 900);
         adopted.ownership = Ownership::Adopted { reason: "trocou para stack/lote-2".into(), at: now };
         s.insert(adopted);
+        let ci = |state: crate::ci::CiState, check: Option<&str>, mins: Option<i64>| crate::ci::Ci {
+            sha: "s".into(),
+            state,
+            failed_check: check.map(String::from),
+            finished_at: mins.map(|m| now - chrono::Duration::minutes(m)),
+            observed_at: now,
+        };
+        for (n, started, c) in [
+            (4821, Some(40), ci(crate::ci::CiState::Success, None, Some(12))),
+            (4830, Some(15), ci(crate::ci::CiState::Pending, None, None)),
+            (4834, None, ci(crate::ci::CiState::Pending, None, None)),
+            (4835, None, ci(crate::ci::CiState::Failure, Some("rspec"), None)),
+            (4812, Some(200), ci(crate::ci::CiState::Success, None, Some(180))),
+        ] {
+            let r = s.get_mut(&PrKey::new("acme/app", n)).unwrap();
+            r.work_started_at = started.map(|m| now - chrono::Duration::minutes(m));
+            r.work_agent = started.map(|_| "claude".to_string());
+            r.ci = Some(c);
+        }
+        let mine = |n: u64, title: &str, draft: bool, c: crate::ci::Ci, age_min: i64| crate::state::MyPr {
+            number: n,
+            title: title.into(),
+            url: String::new(),
+            draft,
+            created_at: now - chrono::Duration::minutes(age_min),
+            head_sha: "s".into(),
+            ci: Some(c),
+        };
+        s.my_prs.repos.insert(
+            "acme/app".into(),
+            crate::state::MyPrsRepo {
+                prs: vec![
+                    mine(4840, "feat: importa fornecedores por planilha", false, ci(crate::ci::CiState::Pending, None, None), 30),
+                    mine(4827, "chore: atualiza dependências de teste", true, ci(crate::ci::CiState::Success, None, Some(95)), 300),
+                ],
+                opened_24h: 2,
+                as_of: now - chrono::Duration::seconds(20),
+            },
+        );
         let day = crate::today::local_day(now);
         s.reviews_today.last_success = Some(ReviewsTodaySuccess {
             day, count: 6, per_repo: [("acme/app".to_string(), 6)].into(), as_of: now - chrono::Duration::minutes(2),
