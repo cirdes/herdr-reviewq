@@ -26,7 +26,7 @@ pub const PENDING_QUERY: &str = r#"query($q: String!, $owner: String!, $name: St
   }
 }"#;
 
-const MAX_PAGES: usize = 20;
+pub(crate) const MAX_PAGES: usize = 20;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PendingPr {
@@ -72,7 +72,7 @@ pub struct Page {
     pub next_cursor: Option<String>,
 }
 
-fn other(m: impl Into<String>) -> FetchError {
+pub(crate) fn other(m: impl Into<String>) -> FetchError {
     FetchError { kind: ErrorKind::Other, message: m.into() }
 }
 
@@ -86,15 +86,15 @@ fn classify(text: &str) -> FetchError {
     FetchError { kind, message: text.trim().to_string() }
 }
 
-fn str_at(v: &Value, ptr: &str) -> Result<String, FetchError> {
+pub(crate) fn str_at(v: &Value, ptr: &str) -> Result<String, FetchError> {
     v.pointer(ptr).and_then(Value::as_str).map(String::from).ok_or_else(|| other(format!("campo ausente: {ptr}")))
 }
 
-fn arr_at<'v>(v: &'v Value, ptr: &str) -> Result<&'v Vec<Value>, FetchError> {
+pub(crate) fn arr_at<'v>(v: &'v Value, ptr: &str) -> Result<&'v Vec<Value>, FetchError> {
     v.pointer(ptr).and_then(Value::as_array).ok_or_else(|| other(format!("campo ausente: {ptr}")))
 }
 
-fn bool_at(v: &Value, ptr: &str) -> Result<bool, FetchError> {
+pub(crate) fn bool_at(v: &Value, ptr: &str) -> Result<bool, FetchError> {
     v.pointer(ptr).and_then(Value::as_bool).ok_or_else(|| other(format!("campo ausente: {ptr}")))
 }
 
@@ -234,7 +234,7 @@ pub const OLDER_REVIEWS_QUERY: &str = r#"query($owner: String!, $name: String!, 
   }
 }"#;
 
-const SEARCH_CEILING: u64 = 1000;
+pub(crate) const SEARCH_CEILING: u64 = 1000;
 /// Páginas de reviews por PR, contando a página inicial da busca.
 const MAX_REVIEW_PAGES: usize = 10;
 const GH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -262,7 +262,7 @@ pub struct ReviewedPage {
 }
 
 /// Envelope GraphQL compartilhado: rejeita JSON inválido, `errors` não vazio e `data` nulo.
-fn graphql_data(json: &str) -> Result<Value, FetchError> {
+pub(crate) fn graphql_data(json: &str) -> Result<Value, FetchError> {
     let mut v: Value = serde_json::from_str(json).map_err(|e| other(format!("JSON inválido do gh: {e}")))?;
     if let Some(errs) = v.get("errors").and_then(Value::as_array) {
         if !errs.is_empty() {
@@ -341,7 +341,7 @@ pub fn parse_reviewed_page(json: &str, w: &Window) -> Result<ReviewedPage, Fetch
 
 /// Uma chamada `gh` sob o prazo compartilhado: `timeout = min(30 s, restante)`;
 /// prazo checado antes e depois da chamada (resposta tardia = falha).
-fn gh_json(runner: &dyn Runner, cmd: Cmd, deadline: Instant) -> Result<String, FetchError> {
+pub(crate) fn gh_json(runner: &dyn Runner, cmd: Cmd, deadline: Instant) -> Result<String, FetchError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return Err(other("coleta excedeu o orçamento"));

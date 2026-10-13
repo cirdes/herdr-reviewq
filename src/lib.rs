@@ -7,6 +7,7 @@ pub mod executor;
 pub mod facts;
 pub mod git;
 pub mod github;
+pub mod github_extras;
 pub mod herdr;
 pub mod paths;
 pub mod reconcile;
