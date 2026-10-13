@@ -949,12 +949,25 @@ mod tests {
         use std::os::fd::FromRawFd;
         let fx = fx();
         let log = fx.paths.tui_log_file();
-        let (mut master, mut slave) = (0, 0);
-        let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
-        assert_eq!(rc, 0);
-        unsafe { libc::close(master) };
-        let mut tty = unsafe { std::fs::File::from_raw_fd(slave) };
-        assert!(std::io::Write::write_all(&mut tty, b"x\n").is_err(), "pty sem mestre: a escrita falha");
+        // o openpty não marca CLOEXEC: um processo disparado em paralelo por outro teste herda o
+        // mestre e o mantém aberto, e a escrita não falha. Marca na hora e tenta de novo se perder a corrida.
+        let mut hung = None;
+        for _ in 0..20 {
+            let (mut master, mut slave) = (0, 0);
+            let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut()) };
+            assert_eq!(rc, 0);
+            unsafe {
+                libc::fcntl(master, libc::F_SETFD, libc::FD_CLOEXEC);
+                libc::fcntl(slave, libc::F_SETFD, libc::FD_CLOEXEC);
+                libc::close(master);
+            }
+            let mut tty = unsafe { std::fs::File::from_raw_fd(slave) };
+            if std::io::Write::write_all(&mut tty, b"x\n").is_err() {
+                hung = Some(tty);
+                break;
+            }
+        }
+        let mut tty = hung.expect("pty sem mestre: a escrita falha");
         report_exit(&log, &mut tty, "sinal recebido e o loop não saiu em 1 s");
         let text = std::fs::read_to_string(&log).unwrap();
         assert!(text.contains("sinal recebido"), "{text}");
