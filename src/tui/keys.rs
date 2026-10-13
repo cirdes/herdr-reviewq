@@ -1,6 +1,6 @@
 use crate::requests::RequestKind;
 use crate::state::PrKey;
-use crate::tui::model::{kind_label, Row, UiState, View};
+use crate::tui::model::{kind_label, Row, RowId, UiState, View};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Key {
@@ -57,7 +57,7 @@ pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) 
         return match key {
             Key::Char('y') | Key::Char('Y') => {
                 next.confirm = None;
-                match view.row(&target) {
+                match view.row(&RowId::Review(target.clone())) {
                     Some(row) if eligible(row, kind) => (next, Some(Action::Request(kind, Some(target)))),
                     _ => {
                         next.message = Some(format!("{target} mudou de estado; pedido cancelado"));
@@ -77,17 +77,17 @@ pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) 
 
     next.message = None;
     let selected = ui.selected_row(view);
-    let index = selected.and_then(|r| view.rows.iter().position(|x| x.key == r.key));
+    let index = selected.and_then(|r| view.rows.iter().position(|x| x.id == r.id));
     match key {
         Key::Up | Key::Char('k') => {
             if let Some(i) = index {
-                next.selected = Some(view.rows[i.saturating_sub(1)].key.clone());
+                next.selected = Some(view.rows[i.saturating_sub(1)].id.clone());
             }
             (next, None)
         }
         Key::Down | Key::Char('j') => {
             if let Some(i) = index {
-                next.selected = Some(view.rows[(i + 1).min(view.rows.len() - 1)].key.clone());
+                next.selected = Some(view.rows[(i + 1).min(view.rows.len() - 1)].id.clone());
             }
             (next, None)
         }
@@ -96,19 +96,19 @@ pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) 
         _ => {
             let Some(row) = selected else { return (next, None) };
             match key {
-                Key::Enter if row.eligible.open => (next, Some(Action::Focus(row.key.clone()))),
+                Key::Enter if row.eligible.focus => (next, Some(Action::Focus(row.id.key().clone()))),
                 Key::Enter => {
                     next.message = Some("este PR está sendo criado ou removido".into());
                     (next, None)
                 }
-                Key::Char('o') => (next, Some(Action::OpenUrl(row.key.clone(), row.url.clone()))),
-                Key::Char('l') => (next, Some(Action::ShowLog(row.key.clone()))),
-                Key::Char('R') if row.eligible.retry => (next, Some(Action::Request(RequestKind::Retry, Some(row.key.clone())))),
+                Key::Char('o') => (next, Some(Action::OpenUrl(row.id.key().clone(), row.url.clone()))),
+                Key::Char('l') => (next, Some(Action::ShowLog(row.id.key().clone()))),
+                Key::Char('R') if row.eligible.retry => (next, Some(Action::Request(RequestKind::Retry, Some(row.id.key().clone())))),
                 Key::Char('a') | Key::Char('r') => {
                     let kind = if key == Key::Char('a') { RequestKind::Adopt } else { RequestKind::Release };
                     if eligible(row, kind) {
                         // a confirmação é desenhada a partir de `confirm` (confirm_text), não de `message`
-                        next.confirm = Some((kind, row.key.clone()));
+                        next.confirm = Some((kind, row.id.key().clone()));
                     } else {
                         next.message = Some(not_eligible_msg(kind).into());
                     }
@@ -152,20 +152,20 @@ mod tests {
         let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s"), PrRecord::fixture("o/r", 2, "x", "s")]);
         let (ui, a) = handle(Key::Down, &UiState::default(), &v);
         assert!(a.is_none());
-        assert_eq!(ui.selected, Some(PrKey::new("o/r", 2)));
+        assert_eq!(ui.selected, Some(RowId::Review(PrKey::new("o/r", 2))));
         let (ui, _) = handle(Key::Char('k'), &ui, &v);
-        assert_eq!(ui.selected, Some(PrKey::new("o/r", 1)));
+        assert_eq!(ui.selected, Some(RowId::Review(PrKey::new("o/r", 1))));
     }
 
     #[test]
     fn release_confirmation_is_bound_to_the_chosen_pr() {
         let v = view(vec![adopted(5), adopted(6)]);
-        let ui = UiState { selected: Some(PrKey::new("o/r", 5)), ..Default::default() };
+        let ui = UiState { selected: Some(RowId::Review(PrKey::new("o/r", 5))), ..Default::default() };
         let (ui, a) = handle(Key::Char('r'), &ui, &v);
         assert!(a.is_none());
         assert_eq!(ui.confirm, Some((RequestKind::Release, PrKey::new("o/r", 5))));
         // refresh: a seleção mudou para 6, mas o alvo continua 5
-        let ui = UiState { selected: Some(PrKey::new("o/r", 6)), ..ui };
+        let ui = UiState { selected: Some(RowId::Review(PrKey::new("o/r", 6))), ..ui };
         let (ui, a) = handle(Key::Char('y'), &ui, &v);
         assert!(matches!(a, Some(Action::Request(RequestKind::Release, Some(ref k))) if k.number == 5));
         assert!(ui.confirm.is_none());
@@ -192,7 +192,7 @@ mod tests {
         let mut failed = PrRecord::fixture("o/r", 2, "x", "s");
         failed.phase = Phase::Failed { step: "a".into(), reason: "b".into() };
         let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s"), failed, adopted(5)]);
-        let at = |n| UiState { selected: Some(PrKey::new("o/r", n)), ..Default::default() };
+        let at = |n| UiState { selected: Some(RowId::Review(PrKey::new("o/r", n))), ..Default::default() };
         let (ui, a) = handle(Key::Char('R'), &at(1), &v);
         assert!(a.is_none() && ui.message.unwrap().contains("só vale"));
         let (_, a) = handle(Key::Char('R'), &at(2), &v);

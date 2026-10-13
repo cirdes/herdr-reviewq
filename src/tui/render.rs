@@ -14,10 +14,12 @@ const BOTTOM_H: u16 = 5;
 
 fn section_title(s: Section) -> &'static str {
     match s {
+        Section::Started => "Iniciados",
         Section::Pending => "",
         Section::NoSync => "Sem sync",
         Section::Leaving => "Saindo",
         Section::Adopted => "Adotados",
+        Section::Mine => "Meus PRs",
     }
 }
 
@@ -135,7 +137,7 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
     let status_w = max_status.min(rest * 3 / 5).min(30);
     let author_w = 16.min(rest.saturating_sub(status_w + 2) / 3);
     let title_w = rest.saturating_sub(status_w + author_w + 2);
-    let selected = ui.selected_row(view).map(|r| r.key.clone());
+    let selected = ui.selected_row(view).map(|r| r.id.clone());
     let head = format!("{:<w$} {:<sw$} {:<aw$} {}", "  PR", "Estado", "Autor", "Título", w = PREFIX - 1, sw = status_w, aw = author_w);
     let mut lines: Vec<Line> = vec![Line::styled(clip(&head, area.width as usize), Style::new().add_modifier(Modifier::DIM))];
     let mut current: Option<Section> = None;
@@ -148,7 +150,7 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
                 lines.push(Line::styled(format!(" {title}"), Style::new().add_modifier(Modifier::BOLD)));
             }
         }
-        let is_sel = selected.as_ref() == Some(&row.key);
+        let is_sel = selected.as_ref() == Some(&row.id);
         if is_sel {
             selected_line = lines.len();
         }
@@ -270,7 +272,7 @@ mod tests {
         }
         let ui0 = UiState::default();
         let view = build(&s, &ui0);
-        let last = view.rows.last().unwrap().key.clone();
+        let last = view.rows.last().unwrap().id.clone();
         let label = view.rows.last().unwrap().label.clone();
         let ui = UiState { selected: Some(last), ..Default::default() };
         let out = screen(110, 20, &view, &ui);
