@@ -1,4 +1,5 @@
 pub mod applog;
+pub mod ci;
 pub mod config;
 pub mod daemon;
 pub mod executor;
