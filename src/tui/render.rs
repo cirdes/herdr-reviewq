@@ -132,32 +132,42 @@ fn clip(s: &str, w: usize) -> String {
 }
 
 fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
-    // Colunas: marcador(2) rótulo ícone(1) estado, CI e Início com largura fixa; autor e título
-    // ficam com o que sobra (são eles que encolhem primeiro; sem espaço, o autor some).
+    // Colunas: marcador(2) rótulo ícone(1) estado, CI e Início com largura fixa, Empilhado pelo
+    // maior valor; autor e título ficam com o que sobra (são eles que encolhem primeiro; sem
+    // espaço some o Empilhado e depois o autor).
     const CI_W: usize = 10;
     const START_W: usize = 6;
+    const STACK_HEAD: &str = "Empilhado";
     let label_w = view.rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0).clamp(4, 12);
     let prefix = 2 + label_w + 1 + 1 + 1;
     let rest = (area.width as usize).saturating_sub(prefix);
     let max_status = view.rows.iter().map(|r| r.status.chars().count()).max().unwrap_or(6).max(6);
     let status_w = max_status.min(30).min(rest.saturating_sub(CI_W + START_W + 3));
-    let free = rest.saturating_sub(status_w + CI_W + START_W + 3);
+    let mut free = rest.saturating_sub(status_w + CI_W + START_W + 3);
+    let stack_w = if free >= 34 {
+        view.rows.iter().map(|r| r.stack.chars().count()).max().unwrap_or(0).clamp(STACK_HEAD.chars().count(), 14)
+    } else {
+        0
+    };
+    free = free.saturating_sub(if stack_w > 0 { stack_w + 1 } else { 0 });
     let author_w = if free >= 24 { 16.min(free / 3) } else { 0 };
     let title_w = free.saturating_sub(author_w + 1);
     let selected = ui.selected_row(view).map(|r| r.id.clone());
     let head = format!(
-        "{:<w$} {:<sw$} {:<cw$} {:<iw$} {:<aw$}{}",
+        "{:<w$} {:<sw$} {:<cw$} {:<iw$} {:<aw$}{:<kw$}{}",
         "  PR",
         "Estado",
         "CI",
         "Início",
         if author_w > 0 { "Autor " } else { "" },
+        if stack_w > 0 { format!("{STACK_HEAD} ") } else { String::new() },
         "Título",
         w = prefix - 1,
         sw = status_w,
         cw = CI_W,
         iw = START_W,
-        aw = if author_w > 0 { author_w + 1 } else { 0 }
+        aw = if author_w > 0 { author_w + 1 } else { 0 },
+        kw = if stack_w > 0 { stack_w + 1 } else { 0 }
     );
     let mut lines: Vec<Line> = vec![Line::styled(clip(&head, area.width as usize), Style::new().add_modifier(Modifier::DIM))];
     let mut current: Option<Section> = None;
@@ -175,7 +185,7 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
             selected_line = lines.len();
         }
         let text = format!(
-            "{} {:<lw$} {} {:<sw$} {:<cw$} {:<iw$} {:<aw$}{}",
+            "{} {:<lw$} {} {:<sw$} {:<cw$} {:<iw$} {:<aw$}{:<kw$}{}",
             if is_sel { "▸" } else { " " },
             clip(&row.label, label_w),
             row.icon,
@@ -183,12 +193,14 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
             clip(&row.ci, CI_W),
             clip(&row.started, START_W),
             if author_w > 0 { format!("{} ", clip(&row.author, author_w)) } else { String::new() },
+            if stack_w > 0 { format!("{} ", clip(&row.stack, stack_w)) } else { String::new() },
             clip(&row.title, title_w),
             lw = label_w,
             sw = status_w,
             cw = CI_W,
             iw = START_W,
-            aw = if author_w > 0 { author_w + 1 } else { 0 }
+            aw = if author_w > 0 { author_w + 1 } else { 0 },
+            kw = if stack_w > 0 { stack_w + 1 } else { 0 }
         );
         let style = if is_sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
         lines.push(Line::styled(text, style));
@@ -414,6 +426,31 @@ mod tests {
     }
 
     #[test]
+    fn stacked_column_sits_between_author_and_title() {
+        let mut s = base_state();
+        let mut bottom = PrRecord::fixture("o/r", 1, "feat/a", "s");
+        bottom.title = "primeiro da pilha".into();
+        let mut top = PrRecord::fixture("o/r", 2, "feat/b", "s");
+        top.base_ref = "feat/a".into();
+        top.title = "segundo da pilha".into();
+        s.insert(bottom);
+        s.insert(top);
+        s.insert(PrRecord::fixture("o/r", 3, "feat/c", "s"));
+        let view = build(&s, &UiState::default());
+        let out = screen(110, 24, &view, &UiState::default());
+        let head = out.lines().find(|l| l.contains("Título")).unwrap();
+        let col = |name: &str| head.find(name).unwrap_or_else(|| panic!("faltou {name}:\n{out}"));
+        assert!(col("Autor") < col("Empilhado") && col("Empilhado") < col("Título"), "{head}");
+        let row = |n: &str| out.lines().find(|l| l.contains(n)).unwrap().to_string();
+        assert!(row("#1 ").contains("#1 1/2") && row("#1 ").contains("primeiro"), "{out}");
+        assert!(row("#2 ").contains("#1 2/2"), "{out}");
+        assert!(row("#3 ").contains("Não"), "{out}");
+        // sem espaço, a coluna some antes do título
+        let narrow = screen(60, 14, &view, &UiState::default());
+        assert!(!narrow.contains("Empilhado") && narrow.contains("primeiro"), "{narrow}");
+    }
+
+    #[test]
     fn no_state_and_degenerate_areas_do_not_panic() {
         let ui = UiState::default();
         let view = View::build(None, &ui, &cfg(), &UiFacts::default(), Utc::now());
@@ -443,8 +480,13 @@ mod tests {
             r.first_seen_at = now - chrono::Duration::minutes(age_min);
             r
         };
-        s.insert(pr(4821, "marina", "feat: exporta relatório de fornecedores em CSV", Phase::Ready, 95));
-        s.insert(pr(4830, "joao", "fix: valida CNPJ com dígito verificador zero", Phase::Ready, 60));
+        let mut bottom = pr(4821, "marina", "feat: exporta relatório de fornecedores em CSV", Phase::Ready, 95);
+        bottom.head_ref = "feat/export-csv".into();
+        s.insert(bottom);
+        let mut top = pr(4830, "marina", "feat: agenda a exportação de fornecedores por e-mail", Phase::Ready, 60);
+        top.head_ref = "feat/export-schedule".into();
+        top.base_ref = "feat/export-csv".into();
+        s.insert(top);
         s.insert(pr(4834, "bia", "refactor: extrai cliente HTTP do módulo de cotações", Phase::Preparing, 3));
         s.insert(pr(4835, "rafa", "test: cobre reprocessamento de webhooks", Phase::Failed { step: "pnpm install".into(), reason: "exit 1".into() }, 8));
         let mut leaving = pr(4812, "lu", "feat: filtro por categoria no painel", Phase::Ready, 300);
@@ -503,7 +545,7 @@ mod tests {
         let mut view = View::build(Some(&s), &ui, &cfg, &UiFacts::default(), now);
         let ui = UiState { selected: view.order().first().cloned(), ..ui };
         view = View::build(Some(&s), &ui, &cfg, &UiFacts::default(), now);
-        let (w, h) = (118u16, 20u16);
+        let (w, h) = (130u16, 20u16);
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         t.draw(|f| draw(f, &view, &ui)).unwrap();
         let buf = t.backend().buffer().clone();

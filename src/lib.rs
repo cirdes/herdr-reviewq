@@ -15,6 +15,7 @@ pub mod requests;
 pub mod runner;
 pub mod service;
 pub mod setup;
+pub mod stacks;
 pub mod state;
 pub mod status;
 pub mod today;
