@@ -5,6 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 pub const MIN_W: u16 = 60;
 pub const MIN_H: u16 = 12;
@@ -127,8 +128,22 @@ fn draw_bottom(f: &mut Frame, area: Rect, view: &View) {
     }
 }
 
-fn clip(s: &str, w: usize) -> String {
-    s.chars().take(w).collect()
+/// `s` em exatamente `w` células do terminal: corta pelo que cabe e completa com espaço. Conta a
+/// largura visual, não caracteres: um emoji no nome de um check ocupa duas células e, contado
+/// como um, empurrava as colunas seguintes.
+fn fit(s: &str, w: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let cw = ch.width().unwrap_or(0);
+        if used + cw > w {
+            break;
+        }
+        out.push(ch);
+        used += cw;
+    }
+    out.extend(std::iter::repeat_n(' ', w - used));
+    out
 }
 
 fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
@@ -138,38 +153,31 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
     const CI_W: usize = 10;
     const START_W: usize = 6;
     const STACK_HEAD: &str = "Empilhado";
-    let label_w = view.rows.iter().map(|r| r.label.chars().count()).max().unwrap_or(0).clamp(4, 12);
+    let label_w = view.rows.iter().map(|r| r.label.width()).max().unwrap_or(0).clamp(4, 12);
     let prefix = 2 + label_w + 1 + 1 + 1;
     let rest = (area.width as usize).saturating_sub(prefix);
-    let max_status = view.rows.iter().map(|r| r.status.chars().count()).max().unwrap_or(6).max(6);
+    let max_status = view.rows.iter().map(|r| r.status.width()).max().unwrap_or(6).max(6);
     let status_w = max_status.min(30).min(rest.saturating_sub(CI_W + START_W + 3));
     let mut free = rest.saturating_sub(status_w + CI_W + START_W + 3);
-    let stack_w = if free >= 34 {
-        view.rows.iter().map(|r| r.stack.chars().count()).max().unwrap_or(0).clamp(STACK_HEAD.chars().count(), 14)
-    } else {
-        0
-    };
+    let stack_w = if free >= 34 { view.rows.iter().map(|r| r.stack.width()).max().unwrap_or(0).clamp(STACK_HEAD.width(), 14) } else { 0 };
     free = free.saturating_sub(if stack_w > 0 { stack_w + 1 } else { 0 });
     let author_w = if free >= 24 { 16.min(free / 3) } else { 0 };
     let title_w = free.saturating_sub(author_w + 1);
     let selected = ui.selected_row(view).map(|r| r.id.clone());
-    let head = format!(
-        "{:<w$} {:<sw$} {:<cw$} {:<iw$} {:<aw$}{:<kw$}{}",
-        "  PR",
-        "Estado",
-        "CI",
-        "Início",
-        if author_w > 0 { "Autor " } else { "" },
-        if stack_w > 0 { format!("{STACK_HEAD} ") } else { String::new() },
-        "Título",
-        w = prefix - 1,
-        sw = status_w,
-        cw = CI_W,
-        iw = START_W,
-        aw = if author_w > 0 { author_w + 1 } else { 0 },
-        kw = if stack_w > 0 { stack_w + 1 } else { 0 }
-    );
-    let mut lines: Vec<Line> = vec![Line::styled(clip(&head, area.width as usize), Style::new().add_modifier(Modifier::DIM))];
+    // Cada célula sai com a largura exata da coluna; só o título fica sem o preenchimento final.
+    let line = |mark: &str, label: &str, icon: char, status: &str, ci: &str, started: &str, author: &str, stack: &str, title: &str| {
+        let mut cells = vec![mark.to_string(), fit(label, label_w), icon.to_string(), fit(status, status_w), fit(ci, CI_W), fit(started, START_W)];
+        if author_w > 0 {
+            cells.push(fit(author, author_w));
+        }
+        if stack_w > 0 {
+            cells.push(fit(stack, stack_w));
+        }
+        cells.push(fit(title, title_w).trim_end().to_string());
+        cells.join(" ")
+    };
+    let head = line(" ", "PR", ' ', "Estado", "CI", "Início", "Autor", STACK_HEAD, "Título");
+    let mut lines: Vec<Line> = vec![Line::styled(head, Style::new().add_modifier(Modifier::DIM))];
     let mut current: Option<Section> = None;
     let mut selected_line = 0usize;
     for row in &view.rows {
@@ -184,23 +192,16 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
         if is_sel {
             selected_line = lines.len();
         }
-        let text = format!(
-            "{} {:<lw$} {} {:<sw$} {:<cw$} {:<iw$} {:<aw$}{:<kw$}{}",
+        let text = line(
             if is_sel { "▸" } else { " " },
-            clip(&row.label, label_w),
+            &row.label,
             row.icon,
-            clip(&row.status, status_w),
-            clip(&row.ci, CI_W),
-            clip(&row.started, START_W),
-            if author_w > 0 { format!("{} ", clip(&row.author, author_w)) } else { String::new() },
-            if stack_w > 0 { format!("{} ", clip(&row.stack, stack_w)) } else { String::new() },
-            clip(&row.title, title_w),
-            lw = label_w,
-            sw = status_w,
-            cw = CI_W,
-            iw = START_W,
-            aw = if author_w > 0 { author_w + 1 } else { 0 },
-            kw = if stack_w > 0 { stack_w + 1 } else { 0 }
+            &row.status,
+            &row.ci,
+            &row.started,
+            &row.author,
+            &row.stack,
+            &row.title,
         );
         let style = if is_sel { Style::new().add_modifier(Modifier::REVERSED) } else { Style::new() };
         lines.push(Line::styled(text, style));
@@ -448,6 +449,43 @@ mod tests {
         // sem espaço, a coluna some antes do título
         let narrow = screen(60, 14, &view, &UiState::default());
         assert!(!narrow.contains("Empilhado") && narrow.contains("primeiro"), "{narrow}");
+    }
+
+    /// Coluna (em células do terminal) onde `needle` começa, na primeira linha que contém `line`.
+    fn cell_col(w: u16, h: u16, view: &View, ui: &UiState, line: &str, needle: &str) -> usize {
+        let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+        t.draw(|f| draw(f, view, ui)).unwrap();
+        let buf = t.backend().buffer().clone();
+        let text = |y: u16| (0..w).map(|x| buf[(x, y)].symbol().to_string()).collect::<String>();
+        let y = (0..h).find(|&y| text(y).contains(line)).unwrap_or_else(|| panic!("sem linha {line}"));
+        let chars: Vec<String> = needle.chars().map(String::from).collect();
+        (0..w as usize - chars.len())
+            .find(|&x| chars.iter().enumerate().all(|(i, c)| buf[((x + i) as u16, y)].symbol() == c))
+            .unwrap_or_else(|| panic!("faltou {needle} na linha {line}:\n{}", text(y)))
+    }
+
+    #[test]
+    fn wide_characters_do_not_shift_the_columns() {
+        use crate::ci::{Ci, CiState};
+        let now = Utc::now();
+        let mut s = base_state();
+        let mut wide = PrRecord::fixture("o/r", 1, "feat/a", "s");
+        wide.ci = Some(Ci { sha: "s".into(), state: CiState::Failure, failed_check: Some("🌐 System".into()), finished_at: None, observed_at: now });
+        wide.title = "com emoji no check".into();
+        s.insert(wide);
+        let mut plain = PrRecord::fixture("o/r", 2, "feat/b", "s");
+        plain.ci = Some(Ci { sha: "s".into(), state: CiState::Success, failed_check: None, finished_at: Some(now), observed_at: now });
+        plain.title = "sem emoji".into();
+        s.insert(plain);
+        let view = View::build(Some(&s), &UiState::default(), &cfg(), &UiFacts::default(), now);
+        let ui = UiState::default();
+        let col = |line: &str, needle: &str| cell_col(110, 24, &view, &ui, line, needle);
+        assert_eq!(col("#1 ", "ana"), col("#2 ", "ana"), "autor");
+        assert_eq!(col("#1 ", "Não"), col("#2 ", "Não"), "empilhado");
+        assert_eq!(col("#1 ", "com emoji"), col("#2 ", "sem emoji"), "título");
+        assert_eq!(col("#1 ", "com emoji"), col("Título", "Título"), "título fora da coluna do cabeçalho");
+        assert_eq!(fit("✗ 🌐 System", 10), "✗ 🌐 Syste");
+        assert_eq!(fit("ab", 4), "ab  ");
     }
 
     #[test]
