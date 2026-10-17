@@ -165,9 +165,16 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
     let title_w = free.saturating_sub(author_w + 1);
     let selected = ui.selected_row(view).map(|r| r.id.clone());
     // Cada célula sai com a largura exata da coluna; só o título fica sem o preenchimento final.
-    // CI que não cabe inteira (nome de check longo) fica só com o ícone, em vez de cortada.
+    // CI que não cabe inteira (nome de check longo) perde palavras pelo fim até caber, em vez de
+    // sair cortada no meio: "✗ 🌐 System" vira "✗ 🌐"; nome sem espaço deixa só o ícone.
     let line = |mark: &str, label: &str, icon: char, status: &str, ci: &str, started: &str, author: &str, stack: &str, title: &str| {
-        let ci = if ci.width() > CI_W { ci.chars().take(1).collect() } else { ci.to_string() };
+        let mut ci = ci.to_string();
+        while ci.width() > CI_W {
+            ci = match ci.rsplit_once(char::is_whitespace) {
+                Some((head, _)) => head.trim_end().to_string(),
+                None => ci.chars().take(1).collect(),
+            };
+        }
         let mut cells = vec![mark.to_string(), fit(label, label_w), icon.to_string(), fit(status, status_w), fit(&ci, CI_W), fit(started, START_W)];
         if author_w > 0 {
             cells.push(fit(author, author_w));
@@ -487,10 +494,10 @@ mod tests {
         assert_eq!(col("#1 ", "Não"), col("#2 ", "Não"), "empilhado");
         assert_eq!(col("#1 ", "com emoji"), col("#2 ", "sem emoji"), "título");
         assert_eq!(col("#1 ", "com emoji"), col("Título", "Título"), "título fora da coluna do cabeçalho");
-        // CI que não cabe fica só com o ícone; a que cabe continua inteira
+        // CI que não cabe perde o nome e guarda o ícone do check; a que cabe continua inteira
         let out = screen(110, 24, &view, &ui);
         let row1 = out.lines().find(|l| l.contains("#1 ")).unwrap();
-        assert!(row1.contains("✗ ") && !row1.contains("Syste") && !row1.contains("🌐"), "{row1}");
+        assert!(row1.contains("✗ 🌐") && !row1.contains("Syste"), "{row1}");
         assert!(out.lines().any(|l| l.contains("#2 ") && l.contains("✓ 0s")), "{out}");
         assert_eq!(fit("✗ 🌐 System", 10), "✗ 🌐 Syste");
         assert_eq!(fit("ab", 4), "ab  ");
