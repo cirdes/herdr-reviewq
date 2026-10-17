@@ -74,7 +74,22 @@ The daemon opens a `reviewq` workspace with the panel every time it starts. herd
 | `first-ready` | `herdr-reviewq focus first-ready` | Jumps to the oldest PR that is ready for review |
 | `sync-now` | `herdr-reviewq request sync` | Checks GitHub right away |
 
-The list has these sections, in order: **Iniciados** (pending reviews where an agent was opened, most recent first), **Pendentes**, **Meus PRs** (your open PRs, newest first), **Adotados**, **Sem sync** and **Saindo**. Besides the state, each row shows the CI (`◐` running, `✓` passed and how long ago, `✗` failed and the first failing check when its name fits, `?` not known for the current commit), when work started (`HH:MM` today, `dd/mm` on other days) and whether the PR is stacked (`Não`, or `#<bottom PR> i/n` for its position in the stack). A PR is stacked when its base is the branch of another open PR in the repo. The stack is built from all open PRs of the repo, so the numbering stays the same when a PR in the middle or at the bottom leaves your queue; it only changes when a PR is closed or merged. Before the first collection, only the PRs in the list are used. The counters show pending reviews, reviews done today and PRs you opened in the last 24 hours (`?` means some repo is missing or out of date).
+The list has these sections, in order: **Iniciados** (pending reviews where an agent was opened, most recent first), **Pendentes**, **Meus PRs** (your open PRs, newest first), **Adotados**, **Sem sync** and **Saindo**. The counters show pending reviews, reviews done today and PRs you opened in the last 24 hours (`?` means some repo is missing or out of date).
+
+### Columns
+
+| Column | What it shows |
+|---|---|
+| `PR` | The PR number (`#123`), or `owner/repo#123` when more than one repo is configured. |
+| icon | The worktree: `●` ready, `◐` being created or set up, `✗` setup failed, `⊘` blocked, `○` being removed, `◆` adopted by you. In **Meus PRs** it is the CI icon instead. |
+| `Estado` | The worktree state in words (`pronto`, `preparando`, `falhou · <step>`, `bloqueado · <reason>`, `removendo`), with extra detail where it matters: `sai em Nmin` for a PR leaving your queue, `seu · <reason>` for an adopted worktree, `GitHub sem sync` when the last sync for that repo failed. In **Meus PRs**: `aberto` or `rascunho`. |
+| `CI` | The CI of the PR's latest commit on GitHub: `◐` running, `✓` passed and how long ago, `✗` failed and the first failing check, `?` not known for the current commit, empty before the first collection. When the check name does not fit the column, words are dropped from the end so the icon of the check survives (`✗ 🌐 System` becomes `✗ 🌐`). |
+| `Início` | When you started working on it: the first time an agent (Claude or Codex) was seen open in the PR's worktree, as `HH:MM` today or `dd/mm` on other days. `–` until that happens. It is not the PR's age. |
+| `Autor` | The PR author. `você` in **Meus PRs**. Hidden when the pane is too narrow. |
+| `Empilhado` | Whether the PR is stacked: `Não`, or `#<bottom PR> i/n` for its position in the stack. A PR is stacked when its base is the branch of another open PR in the repo. The stack is built from all open PRs of the repo, so the numbering stays the same when a PR in the middle or at the bottom leaves your queue; it only changes when a PR is closed or merged. Before the first collection, only the PRs in the list are used, and the cell is empty in **Meus PRs**. Hidden before `Autor` when the pane is too narrow. |
+| `Título` | The PR title, with whatever width is left. |
+
+Columns are laid out by terminal cells, so an emoji in a check name does not shift the columns to its right.
 
 Quitting the panel (`q`) closes its pane, because the pane ends with its command. The panel always runs the binary installed in `~/.local/bin`. Panel start, exit (key or signal) and errors are logged to `~/.local/state/herdr-reviewq/logs/tui.log`.
 
