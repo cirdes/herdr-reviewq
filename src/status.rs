@@ -46,7 +46,12 @@ pub fn render_at(state: &State, now: DateTime<Utc>, remove_grace: Duration, repo
             out.push_str(&format!("! {repo}: PRs de fork ignorados {:?}\n", st.forks));
         }
     }
+    let stacks = crate::stacks::labels(state);
     for r in state.prs.values() {
+        let stack = match stacks.get(&r.key).map(String::as_str) {
+            Some(s) if s != crate::stacks::NONE => format!(" · pilha {s}"),
+            _ => String::new(),
+        };
         let owner = match &r.ownership {
             Ownership::Managed => String::new(),
             Ownership::Adopted { reason, .. } => format!(" [adotado: {reason}]"),
@@ -67,7 +72,7 @@ pub fn render_at(state: &State, now: DateTime<Utc>, remove_grace: Duration, repo
             (Some(t), agent) => format!(" · iniciado {} {}", crate::today::start_label(t, now), agent.as_deref().unwrap_or("agente")),
             (None, _) => String::new(),
         };
-        out.push_str(&format!("{}  {}  {}  {}{leaving}{ci}{started}{owner}{warn}\n", r.key, r.author, r.title, phase_label(&r.phase)));
+        out.push_str(&format!("{}  {}  {}  {}{leaving}{ci}{started}{stack}{owner}{warn}\n", r.key, r.author, r.title, phase_label(&r.phase)));
     }
     let mine: Vec<(&String, &crate::state::MyPr)> =
         mine_repos.iter().filter_map(|repo| state.my_prs.repos.get_key_value(repo)).flat_map(|(repo, m)| m.prs.iter().map(move |p| (repo, p))).collect();
@@ -110,6 +115,20 @@ mod tests {
         assert!(out.contains("o/r#1  ana  PR 1  pronto"));
         assert!(out.contains("[adotado: arquivos novos: x]"));
         assert!(out.contains("state.json corrompido"));
+    }
+
+    #[test]
+    fn shows_stack_position_only_when_stacked() {
+        let mut s = State::default();
+        s.insert(PrRecord::fixture("o/r", 1, "feat/a", "s"));
+        let mut top = PrRecord::fixture("o/r", 2, "feat/b", "s");
+        top.base_ref = "feat/a".into();
+        s.insert(top);
+        s.insert(PrRecord::fixture("o/r", 3, "feat/c", "s"));
+        let out = render(&s);
+        assert!(out.contains("o/r#1  ana  PR 1  pronto · pilha #1 1/2"), "{out}");
+        assert!(out.contains("o/r#2  ana  PR 2  pronto · pilha #1 2/2"), "{out}");
+        assert!(out.contains("o/r#3  ana  PR 3  pronto\n"), "{out}");
     }
 
     #[test]

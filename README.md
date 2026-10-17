@@ -18,7 +18,7 @@ A herdr plugin adds a panel that shows your pending reviews, the state of each w
 - **New commits.** When the PR gets new commits, it updates the worktree with `git reset --keep`, which refuses to overwrite local changes.
 - **PR leaves your queue.** It waits `remove_grace_secs` (15 min by default), then removes the worktree and the local branch it created. If the review is requested again later, the worktree comes back.
 - **Work started.** When a Claude or Codex session opens inside a review worktree, reviewq records the time and the agent. herdr doesn't report when an agent started, so the time is the first check (every `poll_interval_secs`) that saw it. This is informational only: it doesn't protect the worktree from removal.
-- **CI and your PRs.** Every `poll_interval_secs` reviewq also reads the CI status of each tracked PR, your open PRs in the configured repos and how many PRs you created in the last 24 hours. This runs after the review sync, in a separate step with a 30-second budget, and it never changes worktrees: if GitHub or herdr fail here, the review queue is unaffected. CI is always the status of the PR's latest commit on GitHub, which may differ from what's checked out locally.
+- **CI, stacks and your PRs.** Every `poll_interval_secs` reviewq also reads the CI status of each tracked PR, the open PRs of each repo (number and branches, to detect stacked PRs), your open PRs in the configured repos and how many PRs you created in the last 24 hours. This runs after the review sync, in a separate step with a 30-second budget, and it never changes worktrees: if GitHub or herdr fail here, the review queue is unaffected. CI is always the status of the PR's latest commit on GitHub, which may differ from what's checked out locally.
 - **Your own work is safe.** If you commit, switch branches or edit files in a worktree, reviewq leaves it in place and shows an alert in `status`. Worktrees you moved to another branch are marked as *adopted*. You can also adopt a worktree yourself before you start working in it. Adopted worktrees are never removed automatically.
 
 ## Requirements
@@ -74,7 +74,22 @@ The daemon opens a `reviewq` workspace with the panel every time it starts. herd
 | `first-ready` | `herdr-reviewq focus first-ready` | Jumps to the oldest PR that is ready for review |
 | `sync-now` | `herdr-reviewq request sync` | Checks GitHub right away |
 
-The list has these sections, in order: **Iniciados** (pending reviews where an agent was opened, most recent first), **Pendentes**, **Meus PRs** (your open PRs, newest first), **Adotados**, **Sem sync** and **Saindo**. Besides the state, each row shows the CI (`◐` running, `✓` passed and how long ago, `✗` failed and the first failing check, `?` not known for the current commit) and when work started (`HH:MM` today, `dd/mm` on other days). The counters show pending reviews, reviews done today and PRs you opened in the last 24 hours (`?` means some repo is missing or out of date).
+The list has these sections, in order: **Iniciados** (pending reviews where an agent was opened, most recent first), **Pendentes**, **Meus PRs** (your open PRs, newest first), **Adotados**, **Sem sync** and **Saindo**. The counters show pending reviews, reviews done today and PRs you opened in the last 24 hours (`?` means some repo is missing or out of date).
+
+### Columns
+
+| Column | What it shows |
+|---|---|
+| `PR` | The PR number (`#123`), or `owner/repo#123` when more than one repo is configured. |
+| icon | The worktree: `●` ready, `◐` being created or set up, `✗` setup failed, `⊘` blocked, `○` being removed, `◆` adopted by you. In **Meus PRs** it is the CI icon instead. |
+| `Estado` | The worktree state in words (`pronto`, `preparando`, `falhou · <step>`, `bloqueado · <reason>`, `removendo`), with extra detail where it matters: `sai em Nmin` for a PR leaving your queue, `seu · <reason>` for an adopted worktree, `GitHub sem sync` when the last sync for that repo failed. In **Meus PRs**: `aberto` or `rascunho`. |
+| `CI` | The CI of the PR's latest commit on GitHub: `◐` running, `✓` passed and how long ago, `✗` failed and the first failing check, `?` not known for the current commit, empty before the first collection. When the check name does not fit the column, words are dropped from the end so the icon of the check survives (`✗ 🌐 System` becomes `✗ 🌐`). |
+| `Início` | When you started working on it: the first time an agent (Claude or Codex) was seen open in the PR's worktree, as `HH:MM` today or `dd/mm` on other days. `–` until that happens. It is not the PR's age. |
+| `Autor` | The PR author. `você` in **Meus PRs**. Hidden when the pane is too narrow. |
+| `Empilhado` | Whether the PR is stacked: `Não`, or `#<bottom PR> i/n` for its position in the stack. A PR is stacked when its base is the branch of another open PR in the repo. The stack is built from all open PRs of the repo, so the numbering stays the same when a PR in the middle or at the bottom leaves your queue; it only changes when a PR is closed or merged. Before the first collection, only the PRs in the list are used, and the cell is empty in **Meus PRs**. Hidden before `Autor` when the pane is too narrow. |
+| `Título` | The PR title, with whatever width is left. |
+
+Columns are laid out by terminal cells, so an emoji in a check name does not shift the columns to its right.
 
 Quitting the panel (`q`) closes its pane, because the pane ends with its command. The panel always runs the binary installed in `~/.local/bin`. Panel start, exit (key or signal) and errors are logged to `~/.local/state/herdr-reviewq/logs/tui.log`.
 
@@ -98,7 +113,7 @@ On your own PRs (**Meus PRs**) only `enter` and `o` do something; `l`, `R`, `a` 
 
 | Command | What it does |
 |---|---|
-| `herdr-reviewq status` | Pending, ready and adopted PRs with CI and work start, today's count, PRs opened in the last 24 hours, your open PRs and alerts |
+| `herdr-reviewq status` | Pending, ready and adopted PRs with CI, work start and stack position, today's count, PRs opened in the last 24 hours, your open PRs and alerts |
 | `herdr-reviewq request sync` | Check GitHub now |
 | `herdr-reviewq request retry --pr owner/repo#123` | Rerun a failed setup, or recreate a missing worktree (managed worktrees only) |
 | `herdr-reviewq request adopt --pr owner/repo#123` | Mark a worktree as yours before you work in it |

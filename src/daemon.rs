@@ -429,9 +429,10 @@ impl<'a> Daemon<'a> {
         self.collect_extras_with(Utc::now(), &stopping);
     }
 
-    /// Agentes, CI e meus PRs. Roda fora do ciclo de reviews e só escreve metadados: trabalha numa
-    /// cópia e, no fim, copia de volta apenas `ci`, `work_started_at`, `work_agent` e `my_prs`.
-    /// Encerramento no meio descarta tudo; falhas ficam no próprio dado e no log.
+    /// Agentes, CI, PRs abertos (pilhas) e meus PRs. Roda fora do ciclo de reviews e só escreve
+    /// metadados: trabalha numa cópia e, no fim, copia de volta apenas `ci`, `work_started_at`,
+    /// `work_agent`, `open_prs` e `my_prs`. Encerramento no meio descarta tudo; falhas ficam no
+    /// próprio dado e no log.
     pub(crate) fn collect_extras_with(&mut self, now: DateTime<Utc>, stop: &dyn Fn() -> bool) {
         if stop() {
             return;
@@ -459,6 +460,20 @@ impl<'a> Daemon<'a> {
                 if let Some(r) = next.get_mut(&PrKey::new(repo, n)) {
                     r.ci = Some(ci);
                 }
+            }
+        }
+        let open = &mut next.open_prs;
+        open.repos.retain(|k, _| repos.contains(k));
+        for repo in &repos {
+            if stop() {
+                return;
+            }
+            match crate::github_extras::fetch_open_prs(self.runner, repo, deadline, stop) {
+                Ok(prs) => {
+                    open.repos.insert(repo.clone(), crate::state::OpenPrsRepo { prs, as_of: now });
+                }
+                // falha mantém a última coleta boa: a pilha pode ficar velha, nunca some
+                Err(e) => info(&format!("PRs abertos em {repo}: {}", e.message)),
             }
         }
         if stop() {
@@ -503,6 +518,7 @@ impl<'a> Daemon<'a> {
             }
         }
         self.state.my_prs = next.my_prs;
+        self.state.open_prs = next.open_prs;
         if let Err(e) = self.save() {
             info(&format!("{e:#}"));
         }
@@ -1626,6 +1642,23 @@ mod tests {
         serde_json::json!({"data": {"search": {"issueCount": n}}}).to_string()
     }
 
+    fn open_json(prs: &[(u64, &str, &str)]) -> String {
+        let nodes: Vec<serde_json::Value> = prs
+            .iter()
+            .map(|(n, head, base)| serde_json::json!({"__typename": "PullRequest", "number": n, "headRefName": head, "baseRefName": base}))
+            .collect();
+        serde_json::json!({"data": {"repository": {"id": "R"}, "search": {"issueCount": nodes.len(),
+            "pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes}}})
+        .to_string()
+    }
+
+    fn open_repo(prs: &[(u64, &str, &str)]) -> crate::state::OpenPrsRepo {
+        crate::state::OpenPrsRepo {
+            prs: prs.iter().map(|(n, h, b)| crate::state::OpenPr { number: *n, head_ref: (*h).into(), base_ref: (*b).into() }).collect(),
+            as_of: extras_now() - chrono::Duration::hours(1),
+        }
+    }
+
     fn extras_now() -> DateTime<Utc> {
         "2026-10-13T15:00:00Z".parse().unwrap()
     }
@@ -1662,6 +1695,7 @@ mod tests {
         runner.gh.on("query={ viewer { login } }", Output::ok(VIEWER));
         runner.gh.on("is:open author:cirdes", Output::ok(&mine_json(&[40, 41])));
         runner.gh.on("created:>=2026-10-12T15:00:00Z", Output::ok(&count_json(2)));
+        runner.gh.on("headRefName baseRefName", Output::ok(&open_json(&[(7, "feat/x", "main"), (9, "feat/y", "feat/x")])));
         let herdr = FakeHerdr::new();
         let mut d = Daemon::new(paths.clone(), config(&fx, "true"), &runner, &herdr, sh).unwrap();
         let rec = crate::state::PrRecord::fixture("o/r", 7, "feat/x", "s7");
@@ -1682,6 +1716,10 @@ mod tests {
         assert_eq!(mine.opened_24h, 2);
         assert_eq!(mine.as_of, extras_now());
         assert!(d.state.my_prs.errors.is_empty());
+        let open = &d.state.open_prs.repos["o/r"];
+        assert_eq!(open.prs.iter().map(|p| (p.number, p.head_ref.as_str(), p.base_ref.as_str())).collect::<Vec<_>>(),
+                   vec![(7, "feat/x", "main"), (9, "feat/y", "feat/x")]);
+        assert_eq!(open.as_of, extras_now());
         assert_eq!(State::read(&paths.state_file()).unwrap(), d.state, "grava no fim");
     }
 
@@ -1777,6 +1815,19 @@ mod tests {
     }
 
     #[test]
+    fn open_prs_failure_keeps_previous_collection() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        runner.gh.on("headRefName baseRefName", Output::fail(1, "boom"));
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        d.state.open_prs.repos.insert("o/r".into(), open_repo(&[(1, "feat/a", "main")]));
+        d.collect_extras_with(extras_now(), &no_stop);
+        assert_eq!(d.state.open_prs.repos["o/r"], open_repo(&[(1, "feat/a", "main")]));
+    }
+
+    #[test]
     fn repo_removed_from_config_is_pruned() {
         let fx = fixture("feat/x");
         let paths = Paths::from_home(fx.root.join("home"));
@@ -1789,9 +1840,11 @@ mod tests {
         d.state.my_prs.viewer = Some("cirdes".into());
         d.state.my_prs.repos.insert("x/y".into(), mine_repo(&[1]));
         d.state.my_prs.errors.insert("x/y".into(), "velho".into());
+        d.state.open_prs.repos.insert("x/y".into(), open_repo(&[(1, "feat/a", "main")]));
         d.collect_extras_with(extras_now(), &no_stop);
         assert_eq!(d.state.my_prs.repos.keys().collect::<Vec<_>>(), vec!["o/r"]);
         assert!(d.state.my_prs.errors.is_empty());
+        assert!(d.state.open_prs.repos.is_empty(), "coleta do repo removido some mesmo sem coleta nova");
     }
 
     #[test]

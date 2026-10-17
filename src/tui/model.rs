@@ -62,6 +62,9 @@ pub struct Eligibility {
     pub log: bool,
 }
 
+/// Célula de Início sem início registrado.
+const NO_START: &str = "–";
+
 #[derive(Debug, Clone)]
 pub struct Row {
     pub id: RowId,
@@ -74,8 +77,11 @@ pub struct Row {
     pub status: String,
     /// Coluna CI (vazia sem dado).
     pub ci: String,
-    /// Coluna Início: `HH:MM` de hoje ou `dd/mm` (São Paulo); vazia sem início.
+    /// Coluna Início: `HH:MM` de hoje ou `dd/mm` (São Paulo); `–` sem início, para a célula
+    /// vazia não parecer falha.
     pub started: String,
+    /// Coluna Empilhado: "Não", ou "#raiz i/n" com a posição na pilha; vazia sem dado.
+    pub stack: String,
     pub url: String,
     pub eligible: Eligibility,
 }
@@ -166,6 +172,7 @@ impl View {
                 ..Default::default()
             };
         };
+        let stacks = crate::stacks::labels(state);
         // (seção, fase, desempate, linha): Iniciados pelo início mais recente, Meus PRs pela criação
         // mais recente, as demais pela ordem de chegada
         let mut rows: Vec<(Section, u8, i64, Row)> = state
@@ -177,12 +184,14 @@ impl View {
                     (Section::Started, Some(t)) => (0, -t.timestamp()),
                     _ => (phase_rank(&r.phase), r.first_seen_at.timestamp()),
                 };
-                (section, rank, tie, row_of(r, section, state, cfg, facts, now))
+                let stack = stacks.get(&r.key).cloned().unwrap_or_default();
+                (section, rank, tie, row_of(r, section, stack, state, cfg, facts, now))
             })
             .collect();
         for repo in &cfg.repos {
             for p in state.my_prs.repos.get(repo).map(|m| m.prs.as_slice()).unwrap_or_default() {
-                rows.push((Section::Mine, 0, -p.created_at.timestamp(), mine_row(repo, p, cfg, now)));
+                let stack = stacks.get(&PrKey::new(repo, p.number)).cloned().unwrap_or_default();
+                rows.push((Section::Mine, 0, -p.created_at.timestamp(), mine_row(repo, p, stack, cfg, now)));
             }
         }
         rows.sort_by(|a, b| (a.0, a.1, a.2, &a.3.id).cmp(&(b.0, b.1, b.2, &b.3.id)));
@@ -220,7 +229,7 @@ fn label(key: &PrKey, cfg: &ViewConfig) -> String {
     if cfg.repos.len() > 1 { key.to_string() } else { format!("#{}", key.number) }
 }
 
-fn mine_row(repo: &str, p: &crate::state::MyPr, cfg: &ViewConfig, now: DateTime<Utc>) -> Row {
+fn mine_row(repo: &str, p: &crate::state::MyPr, stack: String, cfg: &ViewConfig, now: DateTime<Utc>) -> Row {
     let key = PrKey::new(repo, p.number);
     Row {
         label: label(&key, cfg),
@@ -231,7 +240,8 @@ fn mine_row(repo: &str, p: &crate::state::MyPr, cfg: &ViewConfig, now: DateTime<
         icon: crate::ci::icon(p.ci.as_ref()),
         status: if p.draft { "rascunho" } else { "aberto" }.into(),
         ci: crate::ci::cell(p.ci.as_ref(), &p.head_sha, now),
-        started: String::new(),
+        started: NO_START.into(),
+        stack,
         url: p.url.clone(),
         eligible: Eligibility::default(),
     }
@@ -261,7 +271,7 @@ fn icon(r: &PrRecord) -> char {
     }
 }
 
-fn row_of(r: &PrRecord, section: Section, state: &State, cfg: &ViewConfig, facts: &UiFacts, now: DateTime<Utc>) -> Row {
+fn row_of(r: &PrRecord, section: Section, stack: String, state: &State, cfg: &ViewConfig, facts: &UiFacts, now: DateTime<Utc>) -> Row {
     let managed = r.ownership == Ownership::Managed;
     let status = match (&r.ownership, section) {
         (Ownership::Adopted { reason, .. }, _) => {
@@ -296,7 +306,8 @@ fn row_of(r: &PrRecord, section: Section, state: &State, cfg: &ViewConfig, facts
         icon: icon(r),
         status,
         ci: crate::ci::cell(r.ci.as_ref(), r.ci_head(), now),
-        started: r.work_started_at.map(|t| start_label(t, now)).unwrap_or_default(),
+        started: r.work_started_at.map(|t| start_label(t, now)).unwrap_or_else(|| NO_START.into()),
+        stack,
         url: r.url.clone(),
         eligible: Eligibility {
             retry: managed && (matches!(r.phase, Phase::Failed { .. }) || (matches!(r.phase, Phase::Blocked { .. }) && missing)),
@@ -566,6 +577,33 @@ mod tests {
     }
 
     #[test]
+    fn stack_column_covers_queue_and_my_prs() {
+        let now = at("2026-10-13T15:00:00Z");
+        let mut bottom = PrRecord::fixture("o/r", 1, "feat/a", "s");
+        bottom.base_ref = "main".into();
+        let mut s = state_with(vec![bottom], now);
+        with_mine(&mut s, vec![mine(2, false, "2026-10-13T10:00:00Z")], now, 1);
+        // sem coleta: a fila sozinha não vê o PR 2 e o meu PR fica sem dado
+        let v = build(Some(&s), &UiState::default(), &cfg(), now);
+        assert_eq!(v.row(&rid(1)).unwrap().stack, "Não");
+        assert_eq!(v.row(&mid(2)).unwrap().stack, "");
+        // com a coleta, o meu PR 2 está em cima do 1
+        s.open_prs.repos.insert(
+            "o/r".into(),
+            crate::state::OpenPrsRepo {
+                prs: vec![
+                    crate::state::OpenPr { number: 1, head_ref: "feat/a".into(), base_ref: "main".into() },
+                    crate::state::OpenPr { number: 2, head_ref: "feat/b".into(), base_ref: "feat/a".into() },
+                ],
+                as_of: now,
+            },
+        );
+        let v = build(Some(&s), &UiState::default(), &cfg(), now);
+        assert_eq!(v.row(&rid(1)).unwrap().stack, "#1 1/2");
+        assert_eq!(v.row(&mid(2)).unwrap().stack, "#1 2/2");
+    }
+
+    #[test]
     fn reselect_picks_next_survivor_or_previous_at_end() {
         let now = Utc::now();
         let k = rid;
@@ -677,7 +715,7 @@ mod tests {
         with_mine(&mut s, vec![mine(9, true, "2026-10-13T10:00:00Z"), mine(8, false, "2026-10-13T09:00:00Z")], now, 2);
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
         let r9 = v.row(&mid(9)).unwrap();
-        assert_eq!((r9.status.as_str(), r9.author.as_str(), r9.started.as_str()), ("rascunho", "você", ""));
+        assert_eq!((r9.status.as_str(), r9.author.as_str(), r9.started.as_str(), r9.stack.as_str()), ("rascunho", "você", "–", ""));
         assert_eq!(r9.icon, '·');
         assert_eq!(r9.url, "https://github.com/o/r/pull/9");
         assert_eq!(v.row(&mid(8)).unwrap().status, "aberto");
@@ -708,7 +746,7 @@ mod tests {
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
         assert_eq!(v.row(&rid(1)).unwrap().started, "11:32");
         assert_eq!(v.row(&rid(2)).unwrap().started, "12/10");
-        assert_eq!(v.row(&rid(3)).unwrap().started, "");
+        assert_eq!(v.row(&rid(3)).unwrap().started, "–");
     }
 
     #[test]
