@@ -62,6 +62,9 @@ pub struct Eligibility {
     pub log: bool,
 }
 
+/// Célula de Início sem início registrado.
+const NO_START: &str = "–";
+
 #[derive(Debug, Clone)]
 pub struct Row {
     pub id: RowId,
@@ -74,7 +77,8 @@ pub struct Row {
     pub status: String,
     /// Coluna CI (vazia sem dado).
     pub ci: String,
-    /// Coluna Início: `HH:MM` de hoje ou `dd/mm` (São Paulo); vazia sem início.
+    /// Coluna Início: `HH:MM` de hoje ou `dd/mm` (São Paulo); `–` sem início, para a célula
+    /// vazia não parecer falha.
     pub started: String,
     /// Coluna Empilhado: "Não", ou "#raiz i/n" com a posição na pilha; vazia sem dado.
     pub stack: String,
@@ -236,7 +240,7 @@ fn mine_row(repo: &str, p: &crate::state::MyPr, stack: String, cfg: &ViewConfig,
         icon: crate::ci::icon(p.ci.as_ref()),
         status: if p.draft { "rascunho" } else { "aberto" }.into(),
         ci: crate::ci::cell(p.ci.as_ref(), &p.head_sha, now),
-        started: String::new(),
+        started: NO_START.into(),
         stack,
         url: p.url.clone(),
         eligible: Eligibility::default(),
@@ -302,7 +306,7 @@ fn row_of(r: &PrRecord, section: Section, stack: String, state: &State, cfg: &Vi
         icon: icon(r),
         status,
         ci: crate::ci::cell(r.ci.as_ref(), r.ci_head(), now),
-        started: r.work_started_at.map(|t| start_label(t, now)).unwrap_or_default(),
+        started: r.work_started_at.map(|t| start_label(t, now)).unwrap_or_else(|| NO_START.into()),
         stack,
         url: r.url.clone(),
         eligible: Eligibility {
@@ -711,7 +715,7 @@ mod tests {
         with_mine(&mut s, vec![mine(9, true, "2026-10-13T10:00:00Z"), mine(8, false, "2026-10-13T09:00:00Z")], now, 2);
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
         let r9 = v.row(&mid(9)).unwrap();
-        assert_eq!((r9.status.as_str(), r9.author.as_str(), r9.started.as_str(), r9.stack.as_str()), ("rascunho", "você", "", ""));
+        assert_eq!((r9.status.as_str(), r9.author.as_str(), r9.started.as_str(), r9.stack.as_str()), ("rascunho", "você", "–", ""));
         assert_eq!(r9.icon, '·');
         assert_eq!(r9.url, "https://github.com/o/r/pull/9");
         assert_eq!(v.row(&mid(8)).unwrap().status, "aberto");
@@ -742,7 +746,7 @@ mod tests {
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
         assert_eq!(v.row(&rid(1)).unwrap().started, "11:32");
         assert_eq!(v.row(&rid(2)).unwrap().started, "12/10");
-        assert_eq!(v.row(&rid(3)).unwrap().started, "");
+        assert_eq!(v.row(&rid(3)).unwrap().started, "–");
     }
 
     #[test]

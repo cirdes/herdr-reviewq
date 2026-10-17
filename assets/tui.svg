@@ -32,7 +32,7 @@
 <text x="84.8" y="158" fill="#1e1e1e" textLength="8.6" lengthAdjust="spacingAndGlyphs">●</text>
 <text x="102" y="158" fill="#1e1e1e" textLength="51.600002" lengthAdjust="spacingAndGlyphs">pronto</text>
 <text x="368.6" y="158" fill="#1e1e1e" textLength="8.6" lengthAdjust="spacingAndGlyphs">◐</text>
-<text x="463.2" y="158" fill="#1e1e1e" textLength="43" lengthAdjust="spacingAndGlyphs">06:29</text>
+<text x="463.2" y="158" fill="#1e1e1e" textLength="43" lengthAdjust="spacingAndGlyphs">06:36</text>
 <text x="523.4" y="158" fill="#1e1e1e" textLength="51.600002" lengthAdjust="spacingAndGlyphs">marina</text>
 <text x="669.60004" y="158" fill="#1e1e1e" textLength="43" lengthAdjust="spacingAndGlyphs">#4821</text>
 <text x="721.2" y="158" fill="#1e1e1e" textLength="25.800001" lengthAdjust="spacingAndGlyphs">2/2</text>
@@ -48,7 +48,7 @@
 <text x="102" y="177" fill="#d4d4d4" textLength="51.600002" lengthAdjust="spacingAndGlyphs">pronto</text>
 <text x="368.6" y="177" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">✓</text>
 <text x="385.80002" y="177" fill="#d4d4d4" textLength="43" lengthAdjust="spacingAndGlyphs">12min</text>
-<text x="463.2" y="177" fill="#d4d4d4" textLength="43" lengthAdjust="spacingAndGlyphs">06:04</text>
+<text x="463.2" y="177" fill="#d4d4d4" textLength="43" lengthAdjust="spacingAndGlyphs">06:11</text>
 <text x="523.4" y="177" fill="#d4d4d4" textLength="51.600002" lengthAdjust="spacingAndGlyphs">marina</text>
 <text x="669.60004" y="177" fill="#d4d4d4" textLength="43" lengthAdjust="spacingAndGlyphs">#4821</text>
 <text x="721.2" y="177" fill="#d4d4d4" textLength="25.800001" lengthAdjust="spacingAndGlyphs">1/2</text>
@@ -68,6 +68,7 @@
 <text x="222.40001" y="215" fill="#d4d4d4" textLength="60.200005" lengthAdjust="spacingAndGlyphs">install</text>
 <text x="368.6" y="215" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">✗</text>
 <text x="385.80002" y="215" fill="#d4d4d4" textLength="43" lengthAdjust="spacingAndGlyphs">rspec</text>
+<text x="463.2" y="215" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">–</text>
 <text x="523.4" y="215" fill="#d4d4d4" textLength="34.4" lengthAdjust="spacingAndGlyphs">rafa</text>
 <text x="669.60004" y="215" fill="#d4d4d4" textLength="25.800001" lengthAdjust="spacingAndGlyphs">Não</text>
 <text x="755.60004" y="215" fill="#d4d4d4" textLength="43" lengthAdjust="spacingAndGlyphs">test:</text>
@@ -79,6 +80,7 @@
 <text x="84.8" y="234" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">◐</text>
 <text x="102" y="234" fill="#d4d4d4" textLength="86" lengthAdjust="spacingAndGlyphs">preparando</text>
 <text x="368.6" y="234" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">◐</text>
+<text x="463.2" y="234" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">–</text>
 <text x="523.4" y="234" fill="#d4d4d4" textLength="25.800001" lengthAdjust="spacingAndGlyphs">bia</text>
 <text x="669.60004" y="234" fill="#d4d4d4" textLength="25.800001" lengthAdjust="spacingAndGlyphs">Não</text>
 <text x="755.60004" y="234" fill="#d4d4d4" textLength="77.4" lengthAdjust="spacingAndGlyphs">refactor:</text>
@@ -95,6 +97,7 @@
 <text x="84.8" y="272" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">◐</text>
 <text x="102" y="272" fill="#d4d4d4" textLength="51.600002" lengthAdjust="spacingAndGlyphs">aberto</text>
 <text x="368.6" y="272" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">◐</text>
+<text x="463.2" y="272" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">–</text>
 <text x="523.4" y="272" fill="#d4d4d4" textLength="34.4" lengthAdjust="spacingAndGlyphs">você</text>
 <text x="755.60004" y="272" fill="#d4d4d4" textLength="43" lengthAdjust="spacingAndGlyphs">feat:</text>
 <text x="807.2" y="272" fill="#d4d4d4" textLength="60.200005" lengthAdjust="spacingAndGlyphs">importa</text>
@@ -106,6 +109,7 @@
 <text x="102" y="291" fill="#d4d4d4" textLength="68.8" lengthAdjust="spacingAndGlyphs">rascunho</text>
 <text x="368.6" y="291" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">✓</text>
 <text x="385.80002" y="291" fill="#d4d4d4" textLength="17.2" lengthAdjust="spacingAndGlyphs">1h</text>
+<text x="463.2" y="291" fill="#d4d4d4" textLength="8.6" lengthAdjust="spacingAndGlyphs">–</text>
 <text x="523.4" y="291" fill="#d4d4d4" textLength="34.4" lengthAdjust="spacingAndGlyphs">você</text>
 <text x="755.60004" y="291" fill="#d4d4d4" textLength="51.600002" lengthAdjust="spacingAndGlyphs">chore:</text>
 <text x="815.80005" y="291" fill="#d4d4d4" textLength="68.8" lengthAdjust="spacingAndGlyphs">atualiza</text>
