@@ -5,7 +5,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 use ratatui::Frame;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 pub const MIN_W: u16 = 60;
 pub const MIN_H: u16 = 12;
@@ -128,19 +129,26 @@ fn draw_bottom(f: &mut Frame, area: Rect, view: &View) {
     }
 }
 
+/// Células que `s` ocupa no terminal, medidas por grafema como o ratatui desenha: "⚠️" (com
+/// seletor de emoji) e "🧑‍💻" (sequência ZWJ) ocupam duas, embora a soma por caractere dê outra
+/// coisa.
+fn cells(s: &str) -> usize {
+    s.graphemes(true).map(UnicodeWidthStr::width).sum()
+}
+
 /// `s` em exatamente `w` células do terminal: corta pelo que cabe e completa com espaço. Conta a
-/// largura visual, não caracteres: um emoji no nome de um check ocupa duas células e, contado
-/// como um, empurrava as colunas seguintes.
+/// largura visual por grafema, não caracteres: um emoji no nome de um check ocupa duas células e,
+/// contado como um, empurrava as colunas seguintes.
 fn fit(s: &str, w: usize) -> String {
     let mut out = String::new();
     let mut used = 0;
-    for ch in s.chars() {
-        let cw = ch.width().unwrap_or(0);
-        if used + cw > w {
+    for g in s.graphemes(true) {
+        let gw = g.width();
+        if used + gw > w {
             break;
         }
-        out.push(ch);
-        used += cw;
+        out.push_str(g);
+        used += gw;
     }
     out.extend(std::iter::repeat_n(' ', w - used));
     out
@@ -153,13 +161,13 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
     const CI_W: usize = 10;
     const START_W: usize = 6;
     const STACK_HEAD: &str = "Empilhado";
-    let label_w = view.rows.iter().map(|r| r.label.width()).max().unwrap_or(0).clamp(4, 12);
+    let label_w = view.rows.iter().map(|r| cells(&r.label)).max().unwrap_or(0).clamp(4, 12);
     let prefix = 2 + label_w + 1 + 1 + 1;
     let rest = (area.width as usize).saturating_sub(prefix);
-    let max_status = view.rows.iter().map(|r| r.status.width()).max().unwrap_or(6).max(6);
+    let max_status = view.rows.iter().map(|r| cells(&r.status)).max().unwrap_or(6).max(6);
     let status_w = max_status.min(30).min(rest.saturating_sub(CI_W + START_W + 3));
     let mut free = rest.saturating_sub(status_w + CI_W + START_W + 3);
-    let stack_w = if free >= 34 { view.rows.iter().map(|r| r.stack.width()).max().unwrap_or(0).clamp(STACK_HEAD.width(), 14) } else { 0 };
+    let stack_w = if free >= 34 { view.rows.iter().map(|r| cells(&r.stack)).max().unwrap_or(0).clamp(cells(STACK_HEAD), 14) } else { 0 };
     free = free.saturating_sub(if stack_w > 0 { stack_w + 1 } else { 0 });
     let author_w = if free >= 24 { 16.min(free / 3) } else { 0 };
     let title_w = free.saturating_sub(author_w + 1);
@@ -169,7 +177,7 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
     // sair cortada no meio: "✗ 🌐 System" vira "✗ 🌐"; nome sem espaço deixa só o ícone.
     let line = |mark: &str, label: &str, icon: char, status: &str, ci: &str, started: &str, author: &str, stack: &str, title: &str| {
         let mut ci = ci.to_string();
-        while ci.width() > CI_W {
+        while cells(&ci) > CI_W {
             ci = match ci.rsplit_once(char::is_whitespace) {
                 Some((head, _)) => head.trim_end().to_string(),
                 None => ci.chars().take(1).collect(),
@@ -501,6 +509,12 @@ mod tests {
         assert!(out.lines().any(|l| l.contains("#2 ") && l.contains("✓ 0s")), "{out}");
         assert_eq!(fit("✗ 🌐 System", 10), "✗ 🌐 Syste");
         assert_eq!(fit("ab", 4), "ab  ");
+        // emoji com seletor (VS16) e sequência ZWJ contam como o terminal desenha
+        assert_eq!(fit("⚠️ lint", 6), "⚠️ lin");
+        assert_eq!(fit("🧑‍💻 e2e", 4), "🧑‍💻 e");
+        for s in ["⚠️ lint", "🧑‍💻 e2e", "✗ 🌐 System"] {
+            assert_eq!(cells(&fit(s, 7)), 7, "{s}");
+        }
     }
 
     #[test]
