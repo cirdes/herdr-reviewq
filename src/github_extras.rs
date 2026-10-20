@@ -1,10 +1,10 @@
-//! Coletas opcionais do GitHub: CI dos PRs de review e meus PRs. Nada aqui alimenta o ciclo de
-//! reviews; falhas ficam no dado coletado, nunca no snapshot.
+//! Coletas opcionais do GitHub: CI dos PRs de review, meus PRs e PRs abertos (pilhas). Nada aqui
+//! alimenta o ciclo de reviews; falhas ficam no dado coletado, nunca no snapshot.
 
 use crate::ci::{parse_pr_ci, Ci, CI_FRAGMENT};
 use crate::github::{arr_at, bool_at, gh_json, graphql_data, other, str_at, FetchError, MAX_PAGES, SEARCH_CEILING};
 use crate::runner::{Cmd, Runner};
-use crate::state::MyPr;
+use crate::state::{MyPr, OpenPr};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -88,25 +88,21 @@ fn parse_my_pr(node: &Value, now: DateTime<Utc>) -> Result<MyPr, FetchError> {
     })
 }
 
-/// PRs abertos de `viewer` no repo e quantos ele criou desde `since`. Tudo ou nada: qualquer falha
-/// (inclusive no contador) falha o repo.
-pub fn fetch_my_prs(
+/// Percorre todas as páginas de `query` (um `search(query: $q)` com `repository { id }`) e
+/// entrega cada nó a `each`. Tudo ou nada: cancelamento, falta de acesso, teto da busca, cursor
+/// repetido ou excesso de páginas falham a coleta inteira.
+fn search_all(
     runner: &dyn Runner,
     repo: &str,
-    viewer: &str,
-    since: DateTime<Utc>,
-    now: DateTime<Utc>,
+    query: &str,
+    q: &str,
     deadline: Instant,
     cancel: &dyn Fn() -> bool,
-) -> Result<MyPrsResult, FetchError> {
+    mut each: impl FnMut(&Value) -> Result<(), FetchError>,
+) -> Result<Value, FetchError> {
     let (owner, name) = repo.split_once('/').ok_or_else(|| other(format!("repo inválido {repo}")))?;
-    let query = MY_PRS_QUERY.replace("%CI%", CI_FRAGMENT);
-    let q = format!("repo:{repo} is:pr is:open author:{viewer}");
-    let mut prs = Vec::new();
-    let mut seen = BTreeSet::new();
     let mut seen_cursors = BTreeSet::new();
     let mut cursor: Option<String> = None;
-    let mut complete = false;
     for _ in 0..MAX_PAGES {
         if cancel() {
             return Err(other("coleta cancelada (daemon parando)"));
@@ -120,25 +116,20 @@ pub fn fetch_my_prs(
             cmd = cmd.arg("-f").arg(format!("after={c}"));
         }
         let data = graphql_data(&gh_json(runner, cmd, deadline)?)?;
-        if data.get("repository").is_none_or(Value::is_null) {
-            return Err(other("sem acesso ao repositório"));
-        }
+        let repository = match data.get("repository") {
+            Some(r) if !r.is_null() => r.clone(),
+            _ => return Err(other("sem acesso ao repositório")),
+        };
         let search = data.get("search").ok_or_else(|| other("resposta sem search"))?;
         let total = search.get("issueCount").and_then(Value::as_u64).ok_or_else(|| other("search sem issueCount"))?;
         if total > SEARCH_CEILING {
             return Err(other(format!("busca acima do teto do GitHub ({total} PRs)")));
         }
         for node in arr_at(search, "/nodes")? {
-            let pr = parse_my_pr(node, now)?;
-            if seen.insert(pr.number) {
-                prs.push(pr);
-            }
+            each(node)?;
         }
         match bool_at(search, "/pageInfo/hasNextPage")? {
-            false => {
-                complete = true;
-                break;
-            }
+            false => return Ok(repository),
             true => {
                 let c = str_at(search, "/pageInfo/endCursor")?;
                 if !seen_cursors.insert(c.clone()) {
@@ -148,9 +139,31 @@ pub fn fetch_my_prs(
             }
         }
     }
-    if !complete {
-        return Err(other("paginação excedeu o limite"));
-    }
+    Err(other("paginação excedeu o limite"))
+}
+
+/// PRs abertos de `viewer` no repo e quantos ele criou desde `since`. Tudo ou nada: qualquer falha
+/// (inclusive no contador) falha o repo.
+pub fn fetch_my_prs(
+    runner: &dyn Runner,
+    repo: &str,
+    viewer: &str,
+    since: DateTime<Utc>,
+    now: DateTime<Utc>,
+    deadline: Instant,
+    cancel: &dyn Fn() -> bool,
+) -> Result<MyPrsResult, FetchError> {
+    let query = MY_PRS_QUERY.replace("%CI%", CI_FRAGMENT);
+    let q = format!("repo:{repo} is:pr is:open author:{viewer}");
+    let mut prs = Vec::new();
+    let mut seen = BTreeSet::new();
+    search_all(runner, repo, &query, &q, deadline, cancel, |node| {
+        let pr = parse_my_pr(node, now)?;
+        if seen.insert(pr.number) {
+            prs.push(pr);
+        }
+        Ok(())
+    })?;
     if cancel() {
         return Err(other("coleta cancelada (daemon parando)"));
     }
@@ -159,6 +172,45 @@ pub fn fetch_my_prs(
     let data = graphql_data(&gh_json(runner, cmd, deadline)?)?;
     let opened_24h = data.pointer("/search/issueCount").and_then(Value::as_u64).ok_or_else(|| other("contador sem issueCount"))?;
     Ok(MyPrsResult { prs, opened_24h })
+}
+
+pub const OPEN_PRS_QUERY: &str = r#"query($q: String!, $owner: String!, $name: String!, $after: String) {
+  repository(owner: $owner, name: $name) { id defaultBranchRef { name } }
+  search(query: $q, type: ISSUE, first: 50, after: $after) {
+    issueCount
+    pageInfo { hasNextPage endCursor }
+    nodes { __typename ... on PullRequest { number isCrossRepository headRefName baseRefName } }
+  }
+}"#;
+
+/// Todos os PRs abertos do repo (número e branches), para montar as pilhas, e a branch padrão
+/// do repo. PR de fork fica de fora: a head dele vive no fork, e uma `main` de fork viraria a
+/// base de todo PR do repo. Tudo ou nada.
+pub fn fetch_open_prs(
+    runner: &dyn Runner,
+    repo: &str,
+    deadline: Instant,
+    cancel: &dyn Fn() -> bool,
+) -> Result<(Vec<OpenPr>, Option<String>), FetchError> {
+    let q = format!("repo:{repo} is:pr is:open");
+    let mut prs = Vec::new();
+    let mut seen = BTreeSet::new();
+    let repository = search_all(runner, repo, OPEN_PRS_QUERY, &q, deadline, cancel, |node| {
+        if node.get("__typename").and_then(Value::as_str) != Some("PullRequest") {
+            return Err(other("resultado da busca não é um PR"));
+        }
+        let pr = OpenPr {
+            number: node.get("number").and_then(Value::as_u64).ok_or_else(|| other("PR sem number"))?,
+            head_ref: str_at(node, "/headRefName")?,
+            base_ref: str_at(node, "/baseRefName")?,
+        };
+        if !bool_at(node, "/isCrossRepository")? && seen.insert(pr.number) {
+            prs.push(pr);
+        }
+        Ok(())
+    })?;
+    let default_branch = repository.pointer("/defaultBranchRef/name").and_then(Value::as_str).map(str::to_string);
+    Ok((prs, default_branch))
 }
 
 #[cfg(test)]
@@ -330,6 +382,43 @@ mod tests {
         assert!(fake.lines().is_empty());
     }
 
+    fn open_node(n: u64, head: &str, base: &str) -> Value {
+        json!({"__typename": "PullRequest", "number": n, "isCrossRepository": false, "headRefName": head, "baseRefName": base})
+    }
+
+    #[test]
+    fn open_prs_lists_pages_and_dedups() {
+        let fake = FakeRunner::new();
+        let fork = json!({"__typename": "PullRequest", "number": 3, "isCrossRepository": true, "headRefName": "main", "baseRefName": "main"});
+        let last = page(vec![open_node(2, "feat/b", "feat/a"), open_node(1, "feat/a", "main"), fork], None, 3)
+            .replace(r#"{"id":"R"}"#, r#"{"id":"R","defaultBranchRef":{"name":"main"}}"#);
+        fake.on("after=C1", Output::ok(&last));
+        fake.on("headRefName baseRefName", Output::ok(&page(vec![open_node(1, "feat/a", "main")], Some("C1"), 3)));
+        let (prs, default_branch) = fetch_open_prs(&fake, "o/r", far(), &never).unwrap();
+        assert_eq!(prs, vec![
+            OpenPr { number: 1, head_ref: "feat/a".into(), base_ref: "main".into() },
+            OpenPr { number: 2, head_ref: "feat/b".into(), base_ref: "feat/a".into() },
+        ], "PR de fork fica de fora");
+        assert_eq!(default_branch.as_deref(), Some("main"));
+        assert!(fake.lines()[0].contains("q=repo:o/r is:pr is:open -f"), "{}", fake.lines()[0]);
+    }
+
+    #[test]
+    fn open_prs_failures() {
+        let fake = FakeRunner::new();
+        fake.on("headRefName", Output::ok(&page(vec![json!({"__typename": "Issue"})], None, 1)));
+        assert!(fetch_open_prs(&fake, "o/r", far(), &never).is_err());
+        let fake = FakeRunner::new();
+        fake.on("headRefName", Output::ok(&page(vec![json!({"__typename": "PullRequest", "number": 1})], None, 1)));
+        assert!(fetch_open_prs(&fake, "o/r", far(), &never).unwrap_err().message.contains("headRefName"));
+        let fake = FakeRunner::new();
+        fake.on("headRefName", Output::fail(1, "boom"));
+        assert!(fetch_open_prs(&fake, "o/r", far(), &never).is_err());
+        let fake = FakeRunner::new();
+        assert!(fetch_open_prs(&fake, "o/r", far(), &|| true).is_err());
+        assert!(fake.lines().is_empty());
+    }
+
     #[test]
     fn my_prs_rejects_non_pr_node() {
         let fake = FakeRunner::new();
@@ -348,5 +437,6 @@ mod dump {
         std::fs::write(dir.join("ci.graphql"), super::review_ci_query(&[1, 2])).unwrap();
         std::fs::write(dir.join("mine.graphql"), super::MY_PRS_QUERY.replace("%CI%", crate::ci::CI_FRAGMENT)).unwrap();
         std::fs::write(dir.join("count.graphql"), super::MY_PRS_COUNT_QUERY).unwrap();
+        std::fs::write(dir.join("open.graphql"), super::OPEN_PRS_QUERY).unwrap();
     }
 }

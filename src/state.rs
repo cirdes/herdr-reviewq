@@ -173,6 +173,30 @@ pub struct MyPrs {
     pub errors: BTreeMap<String, String>,
 }
 
+/// PR aberto do repo, só o que monta pilhas (metadado; nunca afeta o ciclo de reviews).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenPr {
+    pub number: u64,
+    pub head_ref: String,
+    pub base_ref: String,
+}
+
+/// Última coleta boa dos PRs abertos de um repo.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OpenPrsRepo {
+    pub prs: Vec<OpenPr>,
+    /// Branch padrão do repo: PR com essa head (release `main` → `production`) não abre pilha.
+    #[serde(default)]
+    pub default_branch: Option<String>,
+    pub as_of: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct OpenPrs {
+    #[serde(default)]
+    pub repos: BTreeMap<String, OpenPrsRepo>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Suppression {
     /// Suprimido até surgir um ReviewRequestedEvent mais novo que isto.
@@ -239,6 +263,8 @@ pub struct State {
     pub reviews_today: ReviewsToday,
     #[serde(default)]
     pub my_prs: MyPrs,
+    #[serde(default)]
+    pub open_prs: OpenPrs,
 }
 
 fn cap<T>(v: &mut Vec<T>, max: usize) {
@@ -389,10 +415,12 @@ mod tests {
             assert!(rec.remove(k).is_some(), "campo {k} deveria existir");
         }
         v.as_object_mut().unwrap().remove("my_prs").expect("my_prs deveria existir");
+        v.as_object_mut().unwrap().remove("open_prs").expect("open_prs deveria existir");
         let loaded: State = serde_json::from_value(v).unwrap();
         let r = loaded.get(&PrKey::new("o/r", 1)).unwrap();
         assert_eq!((r.ci.clone(), r.work_started_at, r.work_agent.clone()), (None, None, None));
         assert_eq!(loaded.my_prs, MyPrs::default());
+        assert_eq!(loaded.open_prs, OpenPrs::default());
     }
 
     #[test]
@@ -418,6 +446,14 @@ mod tests {
                     ci: Some(sample_ci()),
                 }],
                 opened_24h: 2,
+                as_of: "2026-10-13T14:00:00Z".parse().unwrap(),
+            },
+        );
+        s.open_prs.repos.insert(
+            "o/r".into(),
+            OpenPrsRepo {
+                prs: vec![OpenPr { number: 9, head_ref: "feat/b".into(), base_ref: "feat/a".into() }],
+                default_branch: Some("main".into()),
                 as_of: "2026-10-13T14:00:00Z".parse().unwrap(),
             },
         );
