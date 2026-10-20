@@ -469,8 +469,8 @@ impl<'a> Daemon<'a> {
                 return;
             }
             match crate::github_extras::fetch_open_prs(self.runner, repo, deadline, stop) {
-                Ok(prs) => {
-                    open.repos.insert(repo.clone(), crate::state::OpenPrsRepo { prs, as_of: now });
+                Ok((prs, default_branch)) => {
+                    open.repos.insert(repo.clone(), crate::state::OpenPrsRepo { prs, default_branch, as_of: now });
                 }
                 // falha mantém a última coleta boa: a pilha pode ficar velha, nunca some
                 Err(e) => info(&format!("PRs abertos em {repo}: {}", e.message)),
@@ -1645,9 +1645,9 @@ mod tests {
     fn open_json(prs: &[(u64, &str, &str)]) -> String {
         let nodes: Vec<serde_json::Value> = prs
             .iter()
-            .map(|(n, head, base)| serde_json::json!({"__typename": "PullRequest", "number": n, "headRefName": head, "baseRefName": base}))
+            .map(|(n, head, base)| serde_json::json!({"__typename": "PullRequest", "number": n, "isCrossRepository": false, "headRefName": head, "baseRefName": base}))
             .collect();
-        serde_json::json!({"data": {"repository": {"id": "R"}, "search": {"issueCount": nodes.len(),
+        serde_json::json!({"data": {"repository": {"id": "R", "defaultBranchRef": {"name": "main"}}, "search": {"issueCount": nodes.len(),
             "pageInfo": {"hasNextPage": false, "endCursor": null}, "nodes": nodes}}})
         .to_string()
     }
@@ -1655,6 +1655,7 @@ mod tests {
     fn open_repo(prs: &[(u64, &str, &str)]) -> crate::state::OpenPrsRepo {
         crate::state::OpenPrsRepo {
             prs: prs.iter().map(|(n, h, b)| crate::state::OpenPr { number: *n, head_ref: (*h).into(), base_ref: (*b).into() }).collect(),
+            default_branch: None,
             as_of: extras_now() - chrono::Duration::hours(1),
         }
     }
@@ -1719,6 +1720,7 @@ mod tests {
         let open = &d.state.open_prs.repos["o/r"];
         assert_eq!(open.prs.iter().map(|p| (p.number, p.head_ref.as_str(), p.base_ref.as_str())).collect::<Vec<_>>(),
                    vec![(7, "feat/x", "main"), (9, "feat/y", "feat/x")]);
+        assert_eq!(open.default_branch.as_deref(), Some("main"));
         assert_eq!(open.as_of, extras_now());
         assert_eq!(State::read(&paths.state_file()).unwrap(), d.state, "grava no fim");
     }

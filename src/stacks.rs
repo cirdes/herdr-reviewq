@@ -1,8 +1,10 @@
 //! Pilhas de PRs (stacked PRs): um PR está empilhado quando sua base é a branch de outro PR
 //! aberto do mesmo repo. Os nós vêm dos PRs abertos coletados pelo daemon (`state.open_prs`),
 //! completados pelos PRs da fila; sem coleta ainda, só a fila entra e a pilha fica parcial.
+//! PR de fork não entra (a coleta já o descarta) e PR cuja head é a branch padrão do repo
+//! (release `main` → `production`) não abre pilha: senão todo PR para `main` viraria filho dele.
 
-use crate::state::{PrKey, State};
+use crate::state::{PrKey, Remote, State};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Rótulo de quem está fora de pilha.
@@ -15,7 +17,9 @@ struct Node {
 }
 
 /// Rótulo por PR conhecido: "#raiz i/n" (pré-ordem a partir do PR de baixo, filhos por número)
-/// ou `NONE`. Entram os PRs abertos coletados e os da fila; na dúvida vale o coletado.
+/// ou `NONE`. Entram os PRs abertos coletados e os da fila. Quando os dois divergem, vale o PR
+/// pendente da fila, que o daemon atualiza a cada sync; a coleta é mais lenta e, se falhar, fica
+/// parada. PR da fila que não está pendente não é mais atualizado, então aí vale a coleta.
 pub fn labels(state: &State) -> BTreeMap<PrKey, String> {
     let mut nodes: BTreeMap<&str, BTreeMap<u64, Node>> = BTreeMap::new();
     for (repo, open) in &state.open_prs.repos {
@@ -25,23 +29,27 @@ pub fn labels(state: &State) -> BTreeMap<PrKey, String> {
         }
     }
     for r in state.prs.values() {
-        nodes
-            .entry(&r.key.repo)
-            .or_default()
-            .entry(r.key.number)
-            .or_insert_with(|| Node { number: r.key.number, head: r.head_ref.clone(), base: r.base_ref.clone() });
+        let node = Node { number: r.key.number, head: r.head_ref.clone(), base: r.base_ref.clone() };
+        let repo = nodes.entry(&r.key.repo).or_default();
+        if r.remote == Remote::Pending && !r.base_ref.is_empty() {
+            repo.insert(r.key.number, node);
+        } else {
+            repo.entry(r.key.number).or_insert(node);
+        }
     }
     let mut out = BTreeMap::new();
     for (repo, nodes) in &nodes {
-        for (n, label) in repo_labels(nodes) {
+        let default_branch = state.open_prs.repos.get(*repo).and_then(|o| o.default_branch.as_deref());
+        for (n, label) in repo_labels(nodes, default_branch) {
             out.insert(PrKey::new(repo, n), label);
         }
     }
     out
 }
 
-fn repo_labels(nodes: &BTreeMap<u64, Node>) -> BTreeMap<u64, String> {
-    let by_head: BTreeMap<&str, &Node> = nodes.values().map(|n| (n.head.as_str(), n)).collect();
+fn repo_labels(nodes: &BTreeMap<u64, Node>, default_branch: Option<&str>) -> BTreeMap<u64, String> {
+    let by_head: BTreeMap<&str, &Node> =
+        nodes.values().filter(|n| Some(n.head.as_str()) != default_branch).map(|n| (n.head.as_str(), n)).collect();
     let parent = |n: &Node| by_head.get(n.base.as_str()).filter(|p| p.number != n.number).copied();
     let mut children: BTreeMap<u64, Vec<&Node>> = BTreeMap::new();
     for n in nodes.values() {
@@ -88,7 +96,7 @@ mod tests {
     }
 
     fn with_open(s: &mut State, repo: &str, prs: Vec<OpenPr>) {
-        s.open_prs.repos.insert(repo.into(), OpenPrsRepo { prs, as_of: Utc::now() });
+        s.open_prs.repos.insert(repo.into(), OpenPrsRepo { prs, default_branch: Some("main".into()), as_of: Utc::now() });
     }
 
     fn label(s: &State, repo: &str, n: u64) -> String {
@@ -148,6 +156,29 @@ mod tests {
         with_open(&mut s, "o/r", vec![open(1, "feat/a", "main")]);
         s.insert(rec("o/r", 2, "feat/b", "feat/a"));
         assert_eq!(label(&s, "o/r", 1), "#1 1/2");
+        assert_eq!(label(&s, "o/r", 2), "#1 2/2");
+    }
+
+    #[test]
+    fn release_pr_from_default_branch_does_not_adopt_every_pr() {
+        let mut s = State::default();
+        with_open(&mut s, "o/r", vec![open(1, "main", "production"), open(2, "feat/a", "main"), open(3, "feat/b", "feat/a")]);
+        assert_eq!(label(&s, "o/r", 1), NONE);
+        assert_eq!(label(&s, "o/r", 2), "#2 1/2");
+        assert_eq!(label(&s, "o/r", 3), "#2 2/2");
+    }
+
+    #[test]
+    fn pending_queue_record_beats_stale_collection() {
+        // o 1 foi mergeado e o GitHub mudou a base do 2 para main; a coleta ainda é a de antes
+        let mut s = State::default();
+        with_open(&mut s, "o/r", vec![open(1, "feat/a", "main"), open(2, "feat/b", "feat/a")]);
+        let mut r = rec("o/r", 2, "feat/b", "main");
+        r.remote = Remote::Pending;
+        s.insert(r);
+        assert_eq!(label(&s, "o/r", 2), NONE);
+        // fora de pendente o registro da fila para de ser atualizado: vale a coleta
+        s.get_mut(&PrKey::new("o/r", 2)).unwrap().remote = Remote::NotPending;
         assert_eq!(label(&s, "o/r", 2), "#1 2/2");
     }
 }

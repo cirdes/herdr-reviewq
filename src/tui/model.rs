@@ -595,6 +595,7 @@ mod tests {
                     crate::state::OpenPr { number: 1, head_ref: "feat/a".into(), base_ref: "main".into() },
                     crate::state::OpenPr { number: 2, head_ref: "feat/b".into(), base_ref: "feat/a".into() },
                 ],
+                default_branch: Some("main".into()),
                 as_of: now,
             },
         );

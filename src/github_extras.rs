@@ -99,7 +99,7 @@ fn search_all(
     deadline: Instant,
     cancel: &dyn Fn() -> bool,
     mut each: impl FnMut(&Value) -> Result<(), FetchError>,
-) -> Result<(), FetchError> {
+) -> Result<Value, FetchError> {
     let (owner, name) = repo.split_once('/').ok_or_else(|| other(format!("repo inválido {repo}")))?;
     let mut seen_cursors = BTreeSet::new();
     let mut cursor: Option<String> = None;
@@ -116,9 +116,10 @@ fn search_all(
             cmd = cmd.arg("-f").arg(format!("after={c}"));
         }
         let data = graphql_data(&gh_json(runner, cmd, deadline)?)?;
-        if data.get("repository").is_none_or(Value::is_null) {
-            return Err(other("sem acesso ao repositório"));
-        }
+        let repository = match data.get("repository") {
+            Some(r) if !r.is_null() => r.clone(),
+            _ => return Err(other("sem acesso ao repositório")),
+        };
         let search = data.get("search").ok_or_else(|| other("resposta sem search"))?;
         let total = search.get("issueCount").and_then(Value::as_u64).ok_or_else(|| other("search sem issueCount"))?;
         if total > SEARCH_CEILING {
@@ -128,7 +129,7 @@ fn search_all(
             each(node)?;
         }
         match bool_at(search, "/pageInfo/hasNextPage")? {
-            false => return Ok(()),
+            false => return Ok(repository),
             true => {
                 let c = str_at(search, "/pageInfo/endCursor")?;
                 if !seen_cursors.insert(c.clone()) {
@@ -174,20 +175,27 @@ pub fn fetch_my_prs(
 }
 
 pub const OPEN_PRS_QUERY: &str = r#"query($q: String!, $owner: String!, $name: String!, $after: String) {
-  repository(owner: $owner, name: $name) { id }
+  repository(owner: $owner, name: $name) { id defaultBranchRef { name } }
   search(query: $q, type: ISSUE, first: 50, after: $after) {
     issueCount
     pageInfo { hasNextPage endCursor }
-    nodes { __typename ... on PullRequest { number headRefName baseRefName } }
+    nodes { __typename ... on PullRequest { number isCrossRepository headRefName baseRefName } }
   }
 }"#;
 
-/// Todos os PRs abertos do repo (número e branches), para montar as pilhas. Tudo ou nada.
-pub fn fetch_open_prs(runner: &dyn Runner, repo: &str, deadline: Instant, cancel: &dyn Fn() -> bool) -> Result<Vec<OpenPr>, FetchError> {
+/// Todos os PRs abertos do repo (número e branches), para montar as pilhas, e a branch padrão
+/// do repo. PR de fork fica de fora: a head dele vive no fork, e uma `main` de fork viraria a
+/// base de todo PR do repo. Tudo ou nada.
+pub fn fetch_open_prs(
+    runner: &dyn Runner,
+    repo: &str,
+    deadline: Instant,
+    cancel: &dyn Fn() -> bool,
+) -> Result<(Vec<OpenPr>, Option<String>), FetchError> {
     let q = format!("repo:{repo} is:pr is:open");
     let mut prs = Vec::new();
     let mut seen = BTreeSet::new();
-    search_all(runner, repo, OPEN_PRS_QUERY, &q, deadline, cancel, |node| {
+    let repository = search_all(runner, repo, OPEN_PRS_QUERY, &q, deadline, cancel, |node| {
         if node.get("__typename").and_then(Value::as_str) != Some("PullRequest") {
             return Err(other("resultado da busca não é um PR"));
         }
@@ -196,12 +204,13 @@ pub fn fetch_open_prs(runner: &dyn Runner, repo: &str, deadline: Instant, cancel
             head_ref: str_at(node, "/headRefName")?,
             base_ref: str_at(node, "/baseRefName")?,
         };
-        if seen.insert(pr.number) {
+        if !bool_at(node, "/isCrossRepository")? && seen.insert(pr.number) {
             prs.push(pr);
         }
         Ok(())
     })?;
-    Ok(prs)
+    let default_branch = repository.pointer("/defaultBranchRef/name").and_then(Value::as_str).map(str::to_string);
+    Ok((prs, default_branch))
 }
 
 #[cfg(test)]
@@ -374,19 +383,23 @@ mod tests {
     }
 
     fn open_node(n: u64, head: &str, base: &str) -> Value {
-        json!({"__typename": "PullRequest", "number": n, "headRefName": head, "baseRefName": base})
+        json!({"__typename": "PullRequest", "number": n, "isCrossRepository": false, "headRefName": head, "baseRefName": base})
     }
 
     #[test]
     fn open_prs_lists_pages_and_dedups() {
         let fake = FakeRunner::new();
-        fake.on("after=C1", Output::ok(&page(vec![open_node(2, "feat/b", "feat/a"), open_node(1, "feat/a", "main")], None, 2)));
-        fake.on("headRefName baseRefName", Output::ok(&page(vec![open_node(1, "feat/a", "main")], Some("C1"), 2)));
-        let prs = fetch_open_prs(&fake, "o/r", far(), &never).unwrap();
+        let fork = json!({"__typename": "PullRequest", "number": 3, "isCrossRepository": true, "headRefName": "main", "baseRefName": "main"});
+        let last = page(vec![open_node(2, "feat/b", "feat/a"), open_node(1, "feat/a", "main"), fork], None, 3)
+            .replace(r#"{"id":"R"}"#, r#"{"id":"R","defaultBranchRef":{"name":"main"}}"#);
+        fake.on("after=C1", Output::ok(&last));
+        fake.on("headRefName baseRefName", Output::ok(&page(vec![open_node(1, "feat/a", "main")], Some("C1"), 3)));
+        let (prs, default_branch) = fetch_open_prs(&fake, "o/r", far(), &never).unwrap();
         assert_eq!(prs, vec![
             OpenPr { number: 1, head_ref: "feat/a".into(), base_ref: "main".into() },
             OpenPr { number: 2, head_ref: "feat/b".into(), base_ref: "feat/a".into() },
-        ]);
+        ], "PR de fork fica de fora");
+        assert_eq!(default_branch.as_deref(), Some("main"));
         assert!(fake.lines()[0].contains("q=repo:o/r is:pr is:open -f"), "{}", fake.lines()[0]);
     }
 

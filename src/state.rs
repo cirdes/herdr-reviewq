@@ -185,6 +185,9 @@ pub struct OpenPr {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenPrsRepo {
     pub prs: Vec<OpenPr>,
+    /// Branch padrão do repo: PR com essa head (release `main` → `production`) não abre pilha.
+    #[serde(default)]
+    pub default_branch: Option<String>,
     pub as_of: DateTime<Utc>,
 }
 
@@ -450,6 +453,7 @@ mod tests {
             "o/r".into(),
             OpenPrsRepo {
                 prs: vec![OpenPr { number: 9, head_ref: "feat/b".into(), base_ref: "feat/a".into() }],
+                default_branch: Some("main".into()),
                 as_of: "2026-10-13T14:00:00Z".parse().unwrap(),
             },
         );
