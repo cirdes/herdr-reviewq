@@ -24,7 +24,7 @@ A herdr plugin adds a panel that shows your pending reviews, the state of each w
 ## Requirements
 
 - macOS (the daemon runs as a launchd LaunchAgent)
-- [herdr](https://herdr.dev) 0.9.3 or newer
+- [herdr](https://herdr.dev) 0.9.3 or newer, or the Herdr desktop app (see [Herdr desktop app](#herdr-desktop-app))
 - The [GitHub CLI](https://cli.github.com), authenticated: `gh auth login`, then `gh auth setup-git`
 - Rust and cargo, to build the binary
 - A local clone of every repo you review
@@ -122,6 +122,24 @@ On your own PRs (**Meus PRs**) only `enter` and `o` do something; `l`, `R`, `a` 
 | `herdr-reviewq service uninstall` | Remove the LaunchAgent |
 
 Logs live in `~/.local/state/herdr-reviewq/`: `daemon.log`, plus one redacted setup log per PR under `logs/`.
+
+## Herdr desktop app
+
+reviewq also runs on the Herdr desktop app (`herdr-app`, with herdr-core `hc`). Set it in the config and restart the daemon:
+
+```toml
+backend = "herdr-app"
+```
+
+Nothing else changes: the daemon, the panel, the keys and the command line are the same. What differs is how each step reaches Herdr:
+
+- **Workspaces are spaces, created by herdr-core.** The daemon starts a shell in the worktree with `hc run --label herdr.space=<id>`, so worktrees are prepared even with the window closed; the space shows up when it opens. The id is derived from the worktree path. With the window open, the space is named `#<n> <title>`; otherwise it keeps the folder name.
+- **The panel is the same TUI**, in a `reviewq` space: `herdr-reviewq ui open` (and the daemon at start) runs `herdr-reviewq tui` there. Bind it to a key in `~/.config/herdr-app/keys.json` if you like; `l` opens the setup log in a split below the panel.
+- **Agents** (Claude Code, Codex) are read from `hc ls` and `hc get`.
+- **Notifications** are macOS notifications (`osascript`): the desktop app has no notification command.
+- **Removing a worktree** closes its space and ends its terminals, then runs `git worktree remove` without `--force`, under the same pristine rules.
+
+The herdr plugin (`herdr-plugin.toml`) is not used by the desktop app; there is no need to link it.
 
 ## Safety guarantees
 
