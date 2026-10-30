@@ -349,6 +349,296 @@ impl Herdr for HerdrCli<'_> {
     }
 }
 
+/// Cliente herdr do backend da config: o do terminal, roteado como antes, ou o app desktop.
+pub fn client<'a>(
+    cfg: &crate::config::Config,
+    runner: &'a dyn Runner,
+    routing: &UiRouting,
+    home: &Path,
+    timeout: Duration,
+) -> Box<dyn Herdr + 'a> {
+    match cfg.backend {
+        crate::config::Backend::Herdr => Box::new(HerdrCli::routed(runner, routing).with_timeout(timeout)),
+        crate::config::Backend::HerdrApp => Box::new(HerdrApp::new(runner, home.join(".local/bin").join(TUI_BIN)).with_timeout(timeout)),
+    }
+}
+
+/// Label que marca os terminais de um worktree do reviewq no herdr-core.
+const WORKTREE_LABEL: &str = "reviewq.worktree";
+/// Quanto esperar a janela do herdr-app adotar um space recém-criado.
+const ADOPT_WAIT: Duration = Duration::from_secs(3);
+
+/// Id do space de um worktree: estável para o mesmo caminho, então o daemon e a CLI acham o
+/// mesmo space sem guardar nada além do caminho.
+pub fn space_id(path: &Path) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in canon(path).to_string_lossy().bytes() {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("rq-{h:016x}")
+}
+
+fn app_json(out: &Output, what: &str) -> Result<Value> {
+    let text = if out.stdout.trim().is_empty() { out.stderr.trim() } else { out.stdout.trim() };
+    let v: Value = serde_json::from_str(text).with_context(|| format!("resposta inválida de {what}: {text}"))?;
+    if let Some(err) = v.get("error") {
+        bail!("{what}: {}", err.as_str().map(String::from).unwrap_or_else(|| err.to_string()));
+    }
+    if !out.success() {
+        bail!("{what} falhou: {text}");
+    }
+    Ok(v)
+}
+
+/// O app desktop do Herdr. Os spaces nascem pelo herdr-core (`hc run` com o label
+/// `herdr.space`), então o daemon cria worktrees com a janela fechada; o que só a janela faz
+/// (listar, nomear e mostrar spaces) passa pelo `herdr-app do`. Workspace aqui é space, e
+/// pane é terminal do herdr-core.
+pub struct HerdrApp<'a> {
+    runner: &'a dyn Runner,
+    tui_bin: PathBuf,
+    timeout: Duration,
+}
+
+impl<'a> HerdrApp<'a> {
+    pub fn new(runner: &'a dyn Runner, tui_bin: PathBuf) -> Self {
+        Self { runner, tui_bin, timeout: Duration::from_secs(60) }
+    }
+
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    fn until(&self, deadline: Instant) -> Result<Duration> {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            bail!("prazo esgotado esperando o herdr-app");
+        }
+        Ok(left.min(self.timeout))
+    }
+
+    fn hc(&self, timeout: Duration) -> Cmd {
+        Cmd::new("hc").timeout(timeout)
+    }
+
+    fn app(&self, command: &str, args: Value, timeout: Duration) -> Result<Value> {
+        let cmd = Cmd::new("herdr-app").args(["do", command]).arg(args.to_string()).timeout(timeout);
+        app_json(&self.runner.run(&cmd)?, &format!("herdr-app {command}"))
+    }
+
+    /// Terminais vivos do space.
+    fn space_terminals(&self, id: &str, timeout: Duration) -> Result<Vec<String>> {
+        let cmd = self.hc(timeout).args(["ls", "--json", "--label"]).arg(format!("herdr.space={id}"));
+        let ls = app_json(&self.runner.run(&cmd)?, "hc ls")?;
+        Ok(ls
+            .get("terminals")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|t| t.get("state").and_then(Value::as_str) == Some("live"))
+            .filter_map(|t| t.get("address").and_then(Value::as_str).map(String::from))
+            .collect())
+    }
+
+    fn terminal(&self, address: &str, timeout: Duration) -> Result<Value> {
+        app_json(&self.runner.run(&self.hc(timeout).args(["get", address, "--json"]))?, "hc get")
+    }
+
+    /// Roda `argv` (ou o shell, se vazio) num terminal novo do space `id`, em `cwd`.
+    fn run_in_space(&self, id: &str, cwd: &Path, labels: &[String], argv: &[String], timeout: Duration) -> Result<String> {
+        let mut cmd = self
+            .hc(timeout)
+            .args(["run", "--bg", "--keep", "--no-parent", "--json", "--cwd"])
+            .arg(cwd.to_string_lossy())
+            .arg("--label")
+            .arg(format!("herdr.space={id}"));
+        for l in labels {
+            cmd = cmd.arg("--label").arg(l.clone());
+        }
+        if !argv.is_empty() {
+            cmd = cmd.arg("--").args(argv.iter().cloned());
+        }
+        let v = app_json(&self.runner.run(&cmd)?, "hc run")?;
+        Ok(v.get("address").and_then(Value::as_str).unwrap_or_default().to_string())
+    }
+
+    /// A janela adota o terminal um instante depois do `hc run`; nomear antes disso falha com
+    /// "no such space". Com a janela fechada desiste na hora: o space aparece quando ela abrir,
+    /// com o nome da pasta.
+    fn name_when_adopted(&self, id: &str, label: &str) {
+        let until = Instant::now() + ADOPT_WAIT;
+        loop {
+            match self.list_workspaces(Instant::now() + self.timeout) {
+                Ok(list) if list.iter().any(|w| w.id == id) => {
+                    let _ = self.app("space.rename", serde_json::json!({ "id": id, "name": label }), self.timeout);
+                    return;
+                }
+                Ok(_) if Instant::now() < until => std::thread::sleep(Duration::from_millis(100)),
+                _ => return,
+            }
+        }
+    }
+
+    fn open_space(&self, path: &Path, label: &str) -> Result<String> {
+        let id = space_id(path);
+        let tag = format!("{WORKTREE_LABEL}={}", canon(path).display());
+        self.run_in_space(&id, path, &[tag], &[], self.timeout)?;
+        self.name_when_adopted(&id, label);
+        Ok(id)
+    }
+
+    fn git(&self, dir: &Path, args: &[&str]) -> Result<String> {
+        let out = self.runner.run(&Cmd::new("git").cwd(dir.to_path_buf()).args(args.iter().copied()).timeout(Duration::from_secs(300)))?;
+        if !out.success() {
+            bail!("git {} falhou: {}", args.join(" "), out.stderr.trim());
+        }
+        Ok(out.stdout)
+    }
+}
+
+impl Herdr for HerdrApp<'_> {
+    fn create_worktree(&self, r: &CreateReq) -> Result<Created> {
+        self.git(&r.repo, &["worktree", "add", "-q", "-b", &r.branch, &r.path.to_string_lossy(), &r.base])?;
+        let id = self.open_space(&r.path, &r.label)?;
+        Ok(Created { workspace_id: id, path: r.path.clone() })
+    }
+
+    fn find_workspace(&self, repo: &Path, path: &Path) -> Result<Option<String>> {
+        if let Some(id) = self.find_open_workspace(repo, path)? {
+            return Ok(Some(id));
+        }
+        if !path.exists() {
+            return Ok(None);
+        }
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        self.open_space(path, &name).map(Some)
+    }
+
+    fn find_open_workspace(&self, _repo: &Path, path: &Path) -> Result<Option<String>> {
+        let id = space_id(path);
+        Ok((!self.space_terminals(&id, self.timeout)?.is_empty()).then_some(id))
+    }
+
+    /// O caminho vem do label que o reviewq pôs no terminal ao abrir o space; o repo, do
+    /// `--git-common-dir` do próprio worktree. Fecha o space e só então remove, sem `--force`.
+    fn remove_worktree(&self, id: &str) -> Result<()> {
+        let terminals = self.space_terminals(id, self.timeout)?;
+        let path = terminals
+            .iter()
+            .find_map(|t| self.terminal(t, self.timeout).ok()?.pointer(&format!("/labels/{WORKTREE_LABEL}"))?.as_str().map(PathBuf::from))
+            .with_context(|| format!("space {id} sem o label {WORKTREE_LABEL}"))?;
+        let common = self.git(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
+        let repo = Path::new(common.trim()).parent().context("--git-common-dir sem pai")?.to_path_buf();
+        let _ = self.app("space.close", serde_json::json!({ "id": id, "confirmed": true }), self.timeout);
+        for t in self.space_terminals(id, self.timeout)? {
+            let out = self.runner.run(&self.hc(self.timeout).args(["kill", &t]))?;
+            if !out.success() {
+                bail!("hc kill {t} falhou: {}", out.stderr.trim());
+            }
+        }
+        self.git(&repo, &["worktree", "remove", &path.to_string_lossy()]).map(|_| ())
+    }
+
+    /// O herdr-app não tem notificação por CLI: vai a do macOS. Título e corpo seguem como
+    /// argumentos do script, nunca dentro dele.
+    fn notify(&self, title: &str, body: &str, sound: &str) -> Result<()> {
+        let script = match sound {
+            "none" => "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run",
+            _ => "on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv) sound name \"Glass\"\nend run",
+        };
+        let out = self.runner.run(&Cmd::new("osascript").arg("-e").arg(script).arg(title).arg(body).timeout(self.timeout))?;
+        if !out.success() {
+            bail!("osascript falhou: {}", out.stderr.trim());
+        }
+        Ok(())
+    }
+
+    fn report_metadata(&self, _workspace_id: &str, _value: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn list_workspaces(&self, deadline: Instant) -> Result<Vec<WorkspaceInfo>> {
+        let out = self.runner.run(&Cmd::new("herdr-app").arg("ls").timeout(self.until(deadline)?))?;
+        let ls = app_json(&out, "herdr-app ls")?;
+        Ok(ls
+            .get("spaces")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|s| {
+                Some(WorkspaceInfo {
+                    id: s.get("id")?.as_str()?.into(),
+                    label: s.get("name").and_then(Value::as_str).unwrap_or_default().into(),
+                    focused: s.get("active").and_then(Value::as_bool).unwrap_or(false),
+                })
+            })
+            .collect())
+    }
+
+    /// O space do painel já nasce com o TUI como primeiro terminal, para não sobrar um shell
+    /// vazio ao lado dele: o `ensure` acha o TUI rodando e não abre outro.
+    fn create_workspace(&self, label: &str, cwd: &Path, deadline: Instant) -> Result<(String, Option<String>)> {
+        let id = format!("rq-panel-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let argv = [self.tui_bin.to_string_lossy().into_owned(), "tui".into()];
+        let address = self.run_in_space(&id, cwd, &[], &argv, self.until(deadline)?)?;
+        self.name_when_adopted(&id, label);
+        Ok((id, Some(address)))
+    }
+
+    fn focus_workspace(&self, id: &str, deadline: Instant) -> Result<()> {
+        self.app("space.select", serde_json::json!({ "id": id }), self.until(deadline)?).map(|_| ())
+    }
+
+    fn list_panes(&self, workspace: &str, deadline: Instant) -> Result<Vec<PaneInfo>> {
+        let mut out = vec![];
+        for t in self.space_terminals(workspace, self.until(deadline)?)? {
+            let info = self.terminal(&t, self.until(deadline)?)?;
+            let argv: Vec<String> = info
+                .pointer("/foreground/argv")
+                .or_else(|| info.get("argv"))
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            out.push(PaneInfo { id: t, is_reviewq_tui: is_tui_argv(&argv) });
+        }
+        Ok(out)
+    }
+
+    fn open_plugin_pane(&self, workspace: &str, _target_pane: &str, deadline: Instant) -> Result<()> {
+        let argv = [self.tui_bin.to_string_lossy().into_owned(), "tui".into()];
+        let home = self.tui_bin.ancestors().nth(3).unwrap_or(Path::new("/")).to_path_buf();
+        self.run_in_space(workspace, &home, &[], &argv, self.until(deadline)?).map(|_| ())
+    }
+
+    fn list_agents(&self, deadline: Instant) -> Result<Vec<AgentInfo>> {
+        let ls = app_json(&self.runner.run(&self.hc(self.until(deadline)?).args(["ls", "--json"]))?, "hc ls")?;
+        let mut out = vec![];
+        for t in ls.get("terminals").and_then(Value::as_array).into_iter().flatten() {
+            if t.get("state").and_then(Value::as_str) != Some("live") {
+                continue;
+            }
+            let agent = match t.get("agent").and_then(Value::as_str) {
+                Some("claude-code") => "claude",
+                Some(a @ "codex") => a,
+                _ => continue,
+            };
+            let Some(address) = t.get("address").and_then(Value::as_str) else { continue };
+            let cwd = t.get("cwd").and_then(Value::as_str).map(PathBuf::from).filter(|p| p.is_absolute());
+            let foreground_cwd = self
+                .terminal(address, self.until(deadline)?)
+                .ok()
+                .and_then(|v| v.pointer("/foreground/cwd").and_then(Value::as_str).map(PathBuf::from))
+                .filter(|p| p.is_absolute());
+            if cwd.is_some() || foreground_cwd.is_some() {
+                out.push(AgentInfo { agent: agent.into(), cwd, foreground_cwd });
+            }
+        }
+        Ok(out)
+    }
+}
+
 /// Dublê para testes: cria/remove worktrees com git de verdade, sem `--force`.
 #[cfg(test)]
 pub struct FakeHerdr {
@@ -808,5 +1098,169 @@ mod tests {
         assert_eq!(h.find_workspace(&fx.clone, &path).unwrap(), Some(c.workspace_id.clone()));
         h.remove_worktree(&c.workspace_id).unwrap();
         assert!(!path.exists());
+    }
+
+    fn app(fake: &FakeRunner) -> HerdrApp<'_> {
+        HerdrApp::new(fake, "/Users/c/.local/bin/herdr-reviewq".into())
+    }
+
+    fn spaces(ids: &[(&str, &str, bool)]) -> String {
+        serde_json::json!({ "spaces": ids.iter().map(|(id, name, active)| serde_json::json!({ "id": id, "name": name, "active": active })).collect::<Vec<_>>() }).to_string()
+    }
+
+    #[test]
+    fn client_follows_the_configured_backend() {
+        let fake = FakeRunner::new();
+        fake.on("herdr-app ls", Output::ok(&spaces(&[("sp1", "linkana", true)])));
+        let cfg = crate::config::Config::parse(
+            "backend = \"herdr-app\"\nworktrees_dir = \"/w\"\n[[repos]]\nname = \"o/r\"\npath = \"/r\"\nsetup = []\n",
+            Path::new("/h"),
+        )
+        .unwrap();
+        let routing = UiRouting { bin: "herdr".into(), session: None };
+        let ws = client(&cfg, &fake, &routing, Path::new("/h"), Duration::from_secs(5)).list_workspaces(far()).unwrap();
+        assert_eq!(ws, vec![WorkspaceInfo { id: "sp1".into(), label: "linkana".into(), focused: true }]);
+    }
+
+    #[test]
+    fn app_creates_worktree_without_force_and_names_the_space_once_adopted() {
+        let fake = FakeRunner::new();
+        let id = space_id(Path::new("/w/o/r/pr-7"));
+        fake.on("git worktree add", Output::ok(""));
+        fake.on("hc run", Output::ok(r#"{"address":"t9"}"#));
+        fake.on("herdr-app ls", Output::ok(&spaces(&[("sp1", "linkana", true)])));
+        fake.on("herdr-app ls", Output::ok(&spaces(&[("sp1", "linkana", true), (&id, "pr-7", false)])));
+        fake.on("space.rename", Output::ok(r#"{"ok":true}"#));
+        let created = app(&fake)
+            .create_worktree(&CreateReq {
+                repo: "/r".into(), branch: "feat/x".into(), base: "origin/feat/x".into(), path: "/w/o/r/pr-7".into(), label: "#7 título".into(),
+            })
+            .unwrap();
+        assert_eq!(created.workspace_id, id);
+        let calls = fake.calls.borrow();
+        assert_eq!(calls[0].args, ["worktree", "add", "-q", "-b", "feat/x", "/w/o/r/pr-7", "origin/feat/x"]);
+        assert_eq!(calls[0].cwd.as_deref(), Some(Path::new("/r")));
+        assert!(!calls.iter().any(|c| c.args.iter().any(|a| a == "--force")));
+        assert!(calls[1].args.contains(&format!("herdr.space={id}")) && calls[1].args.contains(&"reviewq.worktree=/w/o/r/pr-7".to_string()));
+        let rename: Value = serde_json::from_str(calls[4].args.last().unwrap()).unwrap();
+        assert_eq!((rename["id"].as_str(), rename["name"].as_str()), (Some(id.as_str()), Some("#7 título")));
+    }
+
+    #[test]
+    fn app_creates_spaces_with_the_window_closed() {
+        let fake = FakeRunner::new();
+        fake.on("git worktree add", Output::ok(""));
+        fake.on("hc run", Output::ok(r#"{"address":"t9"}"#));
+        fake.on("herdr-app ls", Output::fail(1, r#"{"error":"Herdr is not running"}"#));
+        let req = CreateReq { repo: "/r".into(), branch: "b".into(), base: "origin/b".into(), path: "/w/pr-1".into(), label: "#1".into() };
+        assert!(app(&fake).create_worktree(&req).is_ok());
+        assert!(fake.lines().iter().all(|l| !l.contains("space.rename")));
+    }
+
+    #[test]
+    fn app_find_open_workspace_never_opens_and_find_workspace_opens_only_existing_worktrees() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pr-1");
+        std::fs::create_dir_all(&path).unwrap();
+        let fake = FakeRunner::new();
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"finished"}]}"#));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[]}"#));
+        fake.on("hc run", Output::ok(r#"{"address":"t4"}"#));
+        fake.on("herdr-app ls", Output::fail(1, "{}"));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[]}"#));
+        let h = app(&fake);
+        assert_eq!(h.find_open_workspace(Path::new("/r"), &path).unwrap(), None);
+        assert_eq!(h.find_workspace(Path::new("/r"), &path).unwrap(), Some(space_id(&path)));
+        assert_eq!(h.find_workspace(Path::new("/r"), &dir.path().join("sumiu")).unwrap(), None);
+        assert_eq!(fake.lines().iter().filter(|l| l.starts_with("hc run")).count(), 1);
+    }
+
+    #[test]
+    fn app_remove_finds_the_worktree_by_label_closes_the_space_and_removes_without_force() {
+        let fake = FakeRunner::new();
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"live"},{"address":"t5","state":"live"}]}"#));
+        fake.on("hc get t3", Output::ok(r#"{"address":"t3","labels":{"herdr.space":"rq-1","reviewq.worktree":"/w/o/r/pr-7"}}"#));
+        fake.on("git rev-parse", Output::ok("/r/.git\n"));
+        fake.on("space.close", Output::fail(1, r#"{"error":"Herdr is not running"}"#));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"live"},{"address":"t5","state":"live"}]}"#));
+        fake.on("hc kill t3", Output::ok(""));
+        fake.on("hc kill t5", Output::ok(""));
+        fake.on("git worktree remove", Output::ok(""));
+        app(&fake).remove_worktree("rq-1").unwrap();
+        let calls = fake.calls.borrow();
+        let last = calls.last().unwrap();
+        assert_eq!((last.args.clone(), last.cwd.clone()), (vec!["worktree".to_string(), "remove".into(), "/w/o/r/pr-7".into()], Some("/r".into())));
+        assert!(!calls.iter().any(|c| c.args.iter().any(|a| a == "--force")));
+    }
+
+    #[test]
+    fn app_remove_refuses_a_space_it_did_not_open() {
+        let fake = FakeRunner::new();
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"live"}]}"#));
+        fake.on("hc get t3", Output::ok(r#"{"address":"t3","labels":{"herdr.space":"sp1"}}"#));
+        assert!(app(&fake).remove_worktree("sp1").unwrap_err().to_string().contains("reviewq.worktree"));
+        assert!(fake.lines().iter().all(|l| !l.contains("kill") && !l.contains("worktree remove")));
+    }
+
+    #[test]
+    fn app_notifies_through_macos_with_text_as_arguments() {
+        let fake = FakeRunner::new();
+        fake.on("osascript", Output::ok(""));
+        fake.on("osascript", Output::ok(""));
+        let h = app(&fake);
+        h.notify("#7 pronto", "título \"com\" aspas", "request").unwrap();
+        h.notify("reviewq", "x", "none").unwrap();
+        let calls = fake.calls.borrow();
+        assert_eq!(&calls[0].args[2..], ["#7 pronto", "título \"com\" aspas"]);
+        assert!(!calls[0].args[1].contains("título"), "o texto nunca entra no script");
+        assert!(calls[0].args[1].contains("sound name") && !calls[1].args[1].contains("sound name"));
+    }
+
+    #[test]
+    fn app_ensure_opens_the_panel_space_with_the_tui_and_finds_it_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        fake.on("herdr-app ls", Output::ok(&spaces(&[("sp1", "linkana", true)])));
+        fake.on("hc run", Output::ok(r#"{"address":"t8"}"#));
+        fake.on("herdr-app ls", Output::fail(1, "{}"));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t8","state":"live"}]}"#));
+        fake.on("hc get t8", Output::ok(r#"{"address":"t8","foreground":{"argv":["/Users/c/.local/bin/herdr-reviewq","tui"]}}"#));
+        let (ws, outcome) = crate::ui::ensure(&app(&fake), &dir.path().join("ui.lock"), dir.path(), far(), Duration::from_secs(1)).unwrap();
+        assert!(ws.starts_with("rq-panel-"));
+        assert_eq!(outcome, crate::ui::UiOutcome::AlreadyOpen);
+        let run = fake.calls.borrow()[1].clone();
+        assert!(run.args.ends_with(&["--".to_string(), "/Users/c/.local/bin/herdr-reviewq".into(), "tui".into()]), "{:?}", run.args);
+        assert!(fake.lines().iter().filter(|l| l.starts_with("hc run")).count() == 1, "sem shell vazio ao lado do painel");
+    }
+
+    #[test]
+    fn app_ensure_reuses_the_panel_space_and_reopens_a_closed_tui() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = FakeRunner::new();
+        fake.on("herdr-app ls", Output::ok(&spaces(&[("sp1", "linkana", true), ("rq-panel-1", "reviewq", false)])));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t2","state":"live"}]}"#));
+        fake.on("hc get t2", Output::ok(r#"{"address":"t2","foreground":{"argv":["-zsh"]}}"#));
+        fake.on("hc run", Output::ok(r#"{"address":"t9"}"#));
+        fake.on("herdr-app ls", Output::ok(&spaces(&[("sp1", "linkana", true), ("rq-panel-1", "reviewq", false)])));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t2","state":"live"},{"address":"t9","state":"live"}]}"#));
+        fake.on("hc get t2", Output::ok(r#"{"address":"t2","foreground":{"argv":["-zsh"]}}"#));
+        fake.on("hc get t9", Output::ok(r#"{"address":"t9","argv":["/Users/c/.local/bin/herdr-reviewq","tui"]}"#));
+        let (ws, outcome) = crate::ui::ensure(&app(&fake), &dir.path().join("ui.lock"), dir.path(), far(), Duration::from_secs(1)).unwrap();
+        assert_eq!((ws.as_str(), outcome), ("rq-panel-1", crate::ui::UiOutcome::Opened));
+        assert!(fake.lines().iter().any(|l| l.starts_with("hc run") && l.contains("herdr.space=rq-panel-1")));
+    }
+
+    #[test]
+    fn app_lists_known_agents_with_their_foreground_folder() {
+        let fake = FakeRunner::new();
+        fake.on("hc ls", Output::ok(r#"{"terminals":[
+            {"address":"t2","agent":"claude-code","cwd":"/w/pr-1","state":"live"},
+            {"address":"t3","agent":"zsh","cwd":"/w/pr-2","state":"live"},
+            {"address":"t4","agent":"codex","cwd":"/w/pr-3","state":"finished"}]}"#));
+        fake.on("hc get t2", Output::ok(r#"{"address":"t2","foreground":{"cwd":"/w/pr-1/app"}}"#));
+        assert_eq!(
+            app(&fake).list_agents(far()).unwrap(),
+            vec![AgentInfo { agent: "claude".into(), cwd: Some("/w/pr-1".into()), foreground_cwd: Some("/w/pr-1/app".into()) }]
+        );
     }
 }

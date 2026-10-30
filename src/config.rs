@@ -10,6 +10,9 @@ pub struct Config {
     pub worktrees_dir: PathBuf,
     #[serde(default)]
     pub herdr_session: Option<String>,
+    /// Onde os worktrees viram workspaces: o herdr do terminal (padrão) ou o app desktop.
+    #[serde(default)]
+    pub backend: Backend,
     #[serde(default = "default_step_timeout")]
     pub step_timeout_secs: u64,
     /// Espera depois que o PR sai da lista antes de remover o worktree.
@@ -21,6 +24,16 @@ pub struct Config {
     pub repos: Vec<RepoConfig>,
     #[serde(default)]
     pub notify: NotifyConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Backend {
+    /// `herdr`, o multiplexador de terminal, com o painel como plugin.
+    #[default]
+    Herdr,
+    /// O app desktop (`herdr-app`, com o herdr-core `hc`), com o painel num space.
+    HerdrApp,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -162,6 +175,7 @@ sound = "done"
         assert_eq!(cfg.step_timeout_secs, 900);
         assert_eq!(cfg.remove_grace_secs, 900);
         assert!(cfg.herdr_session.is_none());
+        assert_eq!(cfg.backend, Backend::Herdr);
         assert!(cfg.repo("acme/app").is_some());
         assert!(cfg.repo("outro/repo").is_none());
     }
@@ -176,6 +190,13 @@ sound = "done"
     fn rejects_bad_repo_name() {
         let text = "worktrees_dir = \"/w\"\n[[repos]]\nname = \"app\"\npath = \"/r\"\nsetup = []\n";
         assert!(Config::parse(text, Path::new("/h")).is_err());
+    }
+
+    #[test]
+    fn backend_selects_the_desktop_app_and_rejects_unknown_values() {
+        let app = Config::parse(&format!("backend = \"herdr-app\"\n{FULL}"), Path::new("/h")).unwrap();
+        assert_eq!(app.backend, Backend::HerdrApp);
+        assert!(Config::parse(&format!("backend = \"tmux\"\n{FULL}"), Path::new("/h")).is_err());
     }
 
     #[test]

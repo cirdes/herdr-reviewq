@@ -4,7 +4,7 @@ use crate::executor::{self, Ctx};
 use crate::facts::{self, divergence, Divergence};
 use crate::git::Git;
 use crate::github::{self, ErrorKind, FetchError, RepoSnapshot, Snapshot};
-use crate::herdr::{Herdr, HerdrCli};
+use crate::herdr::{Herdr, UiRouting};
 use crate::paths::Paths;
 use crate::reconcile::{reconcile, Input, Op};
 use crate::requests::{self, Entry, Request, RequestKind};
@@ -842,10 +842,11 @@ pub fn run(paths: Paths) -> Result<()> {
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
     }
     let runner = RealRunner;
-    let herdr = HerdrCli::new(&runner, cfg.herdr_session.clone());
     // o painel usa a sessão da config (nunca o ambiente) com timeout curto por chamada
-    let ui_herdr = HerdrCli::new(&runner, cfg.herdr_session.clone()).with_timeout(crate::ui::UI_CALL_TIMEOUT);
-    let mut d = Daemon::new(paths, cfg, &runner, &herdr, mise_wrap)?.with_ui_herdr(&ui_herdr);
+    let routing = UiRouting { bin: "herdr".into(), session: cfg.herdr_session.clone() };
+    let herdr = crate::herdr::client(&cfg, &runner, &routing, &paths.home, Duration::from_secs(60));
+    let ui_herdr = crate::herdr::client(&cfg, &runner, &routing, &paths.home, crate::ui::UI_CALL_TIMEOUT);
+    let mut d = Daemon::new(paths, cfg, &runner, herdr.as_ref(), mise_wrap)?.with_ui_herdr(ui_herdr.as_ref());
     info("daemon iniciado");
     while !stopping() {
         d.tick();

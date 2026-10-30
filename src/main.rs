@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use herdr_reviewq::config::{grace_duration, Config, DEFAULT_REMOVE_GRACE_SECS};
-use herdr_reviewq::herdr::{Herdr, HerdrCli, UiRouting};
+use herdr_reviewq::herdr::{self, Herdr, HerdrCli, UiRouting};
 use herdr_reviewq::paths::Paths;
 use herdr_reviewq::requests::{self, RequestKind};
 use herdr_reviewq::runner::RealRunner;
@@ -116,15 +116,19 @@ fn main() -> Result<()> {
             let cfg = load_cfg(&paths);
             let runner = RealRunner;
             let routing = UiRouting::from_process_env(cfg.as_ref().ok().and_then(|c| c.herdr_session.clone()));
-            let herdr = HerdrCli::routed(&runner, &routing).with_timeout(ui::UI_CALL_TIMEOUT);
+            let client: Box<dyn Herdr> = match cfg.as_ref() {
+                Ok(c) => herdr::client(c, &runner, &routing, &paths.home, ui::UI_CALL_TIMEOUT),
+                Err(_) => Box::new(HerdrCli::routed(&runner, &routing).with_timeout(ui::UI_CALL_TIMEOUT)),
+            };
+            let herdr = client.as_ref();
             let deadline = Instant::now() + ui::ENSURE_TOTAL;
             let r = cfg.and_then(|_| match action {
-                UiAction::Ensure => ui::ensure(&herdr, &paths.ui_lock_file(), &paths.home, deadline, ui::LOCK_WAIT_CLI).map(|_| ()),
-                UiAction::Open => ui::open(&herdr, &paths.ui_lock_file(), &paths.home, deadline, ui::LOCK_WAIT_CLI),
+                UiAction::Ensure => ui::ensure(herdr, &paths.ui_lock_file(), &paths.home, deadline, ui::LOCK_WAIT_CLI).map(|_| ()),
+                UiAction::Open => ui::open(herdr, &paths.ui_lock_file(), &paths.home, deadline, ui::LOCK_WAIT_CLI),
             });
             // `ui open` é a action do atalho: o stderr não aparece para ninguém
             match action {
-                UiAction::Open => ui::notify_error(&herdr, r),
+                UiAction::Open => ui::notify_error(herdr, r),
                 UiAction::Ensure => r,
             }
         }
@@ -132,12 +136,16 @@ fn main() -> Result<()> {
             let cfg = load_cfg(&paths);
             let runner = RealRunner;
             let routing = UiRouting::from_process_env(cfg.as_ref().ok().and_then(|c| c.herdr_session.clone()));
-            let herdr = HerdrCli::routed(&runner, &routing).with_timeout(ui::UI_CALL_TIMEOUT);
-            let r = cfg.and_then(|cfg| match ui::focus_first_ready(&herdr, &cfg, || State::read(&paths.state_file()))? {
+            let client: Box<dyn Herdr> = match cfg.as_ref() {
+                Ok(c) => herdr::client(c, &runner, &routing, &paths.home, ui::UI_CALL_TIMEOUT),
+                Err(_) => Box::new(HerdrCli::routed(&runner, &routing).with_timeout(ui::UI_CALL_TIMEOUT)),
+            };
+            let herdr = client.as_ref();
+            let r = cfg.and_then(|cfg| match ui::focus_first_ready(herdr, &cfg, || State::read(&paths.state_file()))? {
                 Some(_) => Ok(()),
                 None => herdr.notify("reviewq", "nenhum PR pronto", "none"),
             });
-            ui::notify_error(&herdr, r)
+            ui::notify_error(herdr, r)
         }
     }
 }

@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::herdr::{Herdr, HerdrCli, UiRouting};
+use crate::herdr::{Herdr, UiRouting};
 use crate::paths::Paths;
 use crate::requests;
 use crate::runner::{Cmd, RealRunner, Runner};
@@ -263,9 +263,21 @@ fn perform(action: &Action, ctx: &WorkerCtx) -> String {
     if !log.exists() {
         return "sem log ainda".into();
     }
+    if ctx.cfg.backend == crate::config::Backend::HerdrApp {
+        return show_log_in_app(ctx.runner, &log);
+    }
     match &ctx.pane {
         None => format!("log em {}", log.display()),
         Some(pane) => show_log(ctx.runner, &ctx.routing, pane, &log),
+    }
+}
+
+/// No herdr-app o painel é o pane focado quando a tecla chega: o split sai abaixo dele.
+fn show_log_in_app(runner: &dyn Runner, log: &Path) -> String {
+    let args = serde_json::json!({ "direction": "down", "argv": ["less", "+F", log.to_string_lossy()] });
+    match runner.run(&Cmd::new("herdr-app").args(["do", "pane.split"]).arg(args.to_string()).timeout(UI_CALL_TIMEOUT)) {
+        Ok(o) if o.success() => "log aberto abaixo".into(),
+        _ => format!("não consegui abrir o split do log; log em {}", log.display()),
     }
 }
 
@@ -353,9 +365,9 @@ fn spawn_worker(cfg: Config, paths: Paths) -> (ActionQueue, mpsc::Receiver<Strin
         .spawn(move || {
             let runner = RealRunner;
             let routing = UiRouting::from_process_env(cfg.herdr_session.clone());
-            let herdr = HerdrCli::routed(&runner, &routing).with_timeout(UI_CALL_TIMEOUT);
+            let herdr = crate::herdr::client(&cfg, &runner, &routing, &paths.home, UI_CALL_TIMEOUT);
             let ctx = WorkerCtx {
-                herdr: &herdr,
+                herdr: herdr.as_ref(),
                 runner: &runner,
                 cfg: &cfg,
                 paths: &paths,
