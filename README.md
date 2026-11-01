@@ -161,7 +161,19 @@ done
 herdr-app check "$M"
 ```
 
-It docks a thin bar at the bottom that shows the machines it listens to and the last space it focused, or the error when a machine can't be read. Every 30 seconds it also writes `{ at }` to the `reviewq-bridge` doc on each machine, so reviewq knows a window is listening:
+Herdr docks a new mod into the layout on screen, but the shipped layouts (`main` and the others) are read-only, so on one of them the mod never starts. Clone the layout (this also switches to the clone) and add the bar at the end of its `work` column, in `~/.config/herdr-app/layouts/main-reviewq.json`:
+
+```sh
+herdr-app do layout.clone '{"name":"main","as":"main-reviewq"}'
+```
+
+```json
+{ "id": "reviewq-bridge", "type": "block", "size": { "px": 22 }, "content": { "mod": "reviewq-bridge" } }
+```
+
+`herdr-app status` should list the mod with no errors.
+
+The bar shows the machines it listens to and the last space it focused, or the error when a machine can't be read. Every 30 seconds it also writes `{ at }` to the `reviewq-bridge` doc on each machine, so reviewq knows a window is listening:
 
 - If no window ever wrote it, the daemon raises an alert (checked every 5 minutes, once until it's fixed).
 - If a focus request finds no recent signal, the panel says so: the request is saved, but the window is closed or doesn't have the mod.

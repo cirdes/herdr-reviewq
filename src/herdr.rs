@@ -365,6 +365,7 @@ pub fn client<'a>(
         crate::config::Backend::Herdr => Box::new(HerdrCli::routed(runner, routing).with_timeout(timeout)),
         crate::config::Backend::HerdrApp => Box::new(
             HerdrApp::new(runner, home.join(".local/bin").join(TUI_BIN))
+                .hc_bin(hc_program(home, on_path(HC_BIN)))
                 .with_timeout(timeout)
                 .remote(window_is_remote(cfg.window, on_path(APP_BIN))),
         ),
@@ -388,6 +389,7 @@ const BRIDGE_DOC: &str = "reviewq-bridge";
 /// Sinal do mod mais velho que isso: a janela fechou ou perdeu esta máquina.
 const BRIDGE_FRESH_MS: i64 = 120_000;
 const APP_BIN: &str = "herdr-app";
+const HC_BIN: &str = "hc";
 const BRIDGE_HELP: &str = "instale o mod reviewq-bridge na janela (README, \"Window on another machine\")";
 
 /// `auto`: sem `herdr-app` aqui, a janela só pode estar em outra máquina.
@@ -397,6 +399,13 @@ pub fn window_is_remote(window: crate::config::Window, app_here: bool) -> bool {
         crate::config::Window::Local => false,
         crate::config::Window::Remote => true,
     }
+}
+
+/// O `hc` pelo PATH quando ele está lá; senão o de `~/.local/bin`, onde o instalador o põe.
+/// Pelo `hc exec` o PATH é o mínimo do sistema e não tem o `hc`.
+fn hc_program(home: &Path, in_path: bool) -> String {
+    let local = home.join(".local/bin").join(HC_BIN);
+    if in_path || !local.is_file() { HC_BIN.into() } else { local.to_string_lossy().into_owned() }
 }
 
 /// O programa está no PATH deste processo, o mesmo que o runner usa (no daemon, o do launchd).
@@ -441,13 +450,19 @@ fn app_json(out: &Output, what: &str) -> Result<Value> {
 pub struct HerdrApp<'a> {
     runner: &'a dyn Runner,
     tui_bin: PathBuf,
+    hc_bin: String,
     timeout: Duration,
     remote: bool,
 }
 
 impl<'a> HerdrApp<'a> {
     pub fn new(runner: &'a dyn Runner, tui_bin: PathBuf) -> Self {
-        Self { runner, tui_bin, timeout: Duration::from_secs(60), remote: false }
+        Self { runner, tui_bin, hc_bin: HC_BIN.into(), timeout: Duration::from_secs(60), remote: false }
+    }
+
+    pub fn hc_bin(mut self, program: String) -> Self {
+        self.hc_bin = program;
+        self
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -560,7 +575,7 @@ impl<'a> HerdrApp<'a> {
     }
 
     fn hc(&self, timeout: Duration) -> Cmd {
-        Cmd::new("hc").timeout(timeout)
+        Cmd::new(&self.hc_bin).timeout(timeout)
     }
 
     fn app(&self, command: &str, args: Value, timeout: Duration) -> Result<Value> {
@@ -1365,6 +1380,17 @@ mod tests {
         assert!(!window_is_remote(Window::Auto, true));
         assert!(window_is_remote(Window::Remote, true));
         assert!(!window_is_remote(Window::Local, false));
+    }
+
+    #[test]
+    fn hc_comes_from_the_path_or_from_local_bin_when_the_path_lacks_it() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(hc_program(home.path(), false), "hc");
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("hc"), "").unwrap();
+        assert_eq!(hc_program(home.path(), true), "hc");
+        assert_eq!(hc_program(home.path(), false), bin.join("hc").to_string_lossy());
     }
 
     #[test]
