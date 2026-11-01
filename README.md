@@ -143,27 +143,28 @@ The herdr plugin (`herdr-plugin.toml`) is not used by the desktop app; there is 
 
 ### Window on another machine
 
-The daemon can run on a machine that the window only connects to, such as a Mac mini added with `hc machine add` from your laptop. That machine has no `herdr-app`, and it can't reach the window: the connection goes from the window to it. Tell reviewq so:
+The daemon can run on a machine that the window only connects to, such as a Mac mini added with `hc machine add` from your laptop. That machine has no `herdr-app`, and it can't reach the window: the connection goes from the window to it. reviewq notices on its own: with `backend = "herdr-app"` and no `herdr-app` in its `PATH`, it treats the window as remote. To force one mode, set `window = "local"` or `window = "remote"`.
 
-```toml
-backend = "herdr-app"
-window  = "remote"
-```
-
-Then reviewq only talks to the herdr-core of its own machine:
+With a remote window, reviewq only talks to the herdr-core of its own machine:
 
 - **Listing, naming and closing spaces** edit the `herdr-app` doc in that core, where the window keeps the machine's spaces. A write only lands if nobody wrote in between; otherwise reviewq reads again and retries.
 - **Focusing a PR** (`enter` in the panel, `focus first-ready`) writes `{ space, at }` to the `reviewq-focus` doc. The `reviewq-bridge` mod, installed in the window, reads that doc on every connected machine once a second and shows the space. A request older than 30 seconds, or made before the mod started, is ignored, so an old one never steals the focus.
 - **The panel's focus is not given back** after it opens: the doc doesn't say which space is shown.
 
-Install the mod on the computer with the window:
+Install the mod on the computer with the window, copying it from the machine that has the repo (here `macmini`; see `hc machine ls`):
 
 ```sh
-cp -R herdr-app/mods/reviewq-bridge ~/.config/herdr-app/mods/
-herdr-app check ~/.config/herdr-app/mods/reviewq-bridge
+M=~/.config/herdr-app/mods/reviewq-bridge; mkdir -p "$M"
+for f in main.js mod.json; do
+  hc exec --on macmini cat Workspaces/herdr-reviewq/herdr-app/mods/reviewq-bridge/$f > "$M/$f"
+done
+herdr-app check "$M"
 ```
 
-It docks a thin bar at the bottom that shows the machines it listens to and the last space it focused, or the error when a machine can't be read.
+It docks a thin bar at the bottom that shows the machines it listens to and the last space it focused, or the error when a machine can't be read. Every 30 seconds it also writes `{ at }` to the `reviewq-bridge` doc on each machine, so reviewq knows a window is listening:
+
+- If no window ever wrote it, the daemon raises an alert (checked every 5 minutes, once until it's fixed).
+- If a focus request finds no recent signal, the panel says so: the request is saved, but the window is closed or doesn't have the mod.
 
 ## Safety guarantees
 

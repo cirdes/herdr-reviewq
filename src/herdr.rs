@@ -89,6 +89,10 @@ pub trait Herdr {
     fn open_plugin_pane(&self, workspace: &str, target_pane: &str, deadline: Instant) -> Result<()>;
     /// Agentes que o herdr reconhece na sessão (Claude, Codex…), com o diretório de cada um.
     fn list_agents(&self, deadline: Instant) -> Result<Vec<AgentInfo>>;
+    /// O que falta para a janela atender o reviewq, se faltar algo (hoje: o mod da janela remota).
+    fn window_warning(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 pub struct HerdrCli<'a> {
@@ -362,7 +366,7 @@ pub fn client<'a>(
         crate::config::Backend::HerdrApp => Box::new(
             HerdrApp::new(runner, home.join(".local/bin").join(TUI_BIN))
                 .with_timeout(timeout)
-                .remote(cfg.window == crate::config::Window::Remote),
+                .remote(window_is_remote(cfg.window, on_path(APP_BIN))),
         ),
     }
 }
@@ -378,6 +382,30 @@ const SPACES_DOC: &str = "herdr-app";
 const FOCUS_DOC: &str = "reviewq-focus";
 /// Quantas vezes reler um doc que outro processo gravou entre a leitura e a escrita.
 const DOC_RETRIES: usize = 3;
+/// Doc do herdr-core onde o mod `reviewq-bridge` deixa `{ at }` a cada 30 s: há uma janela
+/// remota ouvindo esta máquina.
+const BRIDGE_DOC: &str = "reviewq-bridge";
+/// Sinal do mod mais velho que isso: a janela fechou ou perdeu esta máquina.
+const BRIDGE_FRESH_MS: i64 = 120_000;
+const APP_BIN: &str = "herdr-app";
+const BRIDGE_HELP: &str = "instale o mod reviewq-bridge na janela (README, \"Window on another machine\")";
+
+/// `auto`: sem `herdr-app` aqui, a janela só pode estar em outra máquina.
+pub fn window_is_remote(window: crate::config::Window, app_here: bool) -> bool {
+    match window {
+        crate::config::Window::Auto => !app_here,
+        crate::config::Window::Local => false,
+        crate::config::Window::Remote => true,
+    }
+}
+
+/// O programa está no PATH deste processo, o mesmo que o runner usa (no daemon, o do launchd).
+fn on_path(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| std::fs::metadata(dir.join(program)).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+    })
+}
 
 /// Id do space de um worktree: estável para o mesmo caminho, então o daemon e a CLI acham o
 /// mesmo space sem guardar nada além do caminho.
@@ -508,7 +536,19 @@ impl<'a> HerdrApp<'a> {
         self.doc_edit(FOCUS_DOC, |doc| {
             *doc = serde_json::json!({ "space": id, "at": at });
             Ok(true)
-        })
+        })?;
+        // O pedido fica gravado de todo jeito; sem ninguém ouvindo, quem apertou Enter precisa saber.
+        match self.bridge_age_ms(timeout)? {
+            Some(age) if age <= BRIDGE_FRESH_MS => Ok(()),
+            Some(age) => bail!("pedido de foco gravado, mas a janela não dá sinal há {} min: está aberta com o mod reviewq-bridge?", age / 60_000),
+            None => bail!("pedido de foco gravado, mas nenhuma janela ouve esta máquina: {BRIDGE_HELP}"),
+        }
+    }
+
+    /// Há quanto tempo o mod deu o último sinal; `None` se nunca deu.
+    fn bridge_age_ms(&self, timeout: Duration) -> Result<Option<i64>> {
+        let (beat, _) = self.doc_get(BRIDGE_DOC, timeout)?;
+        Ok(beat.get("at").and_then(Value::as_i64).map(|at| (chrono::Utc::now().timestamp_millis() - at).max(0)))
     }
 
     fn until(&self, deadline: Instant) -> Result<Duration> {
@@ -741,6 +781,14 @@ impl Herdr for HerdrApp<'_> {
         }
         Ok(out)
     }
+
+    /// Só o "nunca deu sinal" vira aviso: janela fechada ou dormindo é normal e não deve alertar.
+    fn window_warning(&self) -> Result<Option<String>> {
+        if !self.remote || self.bridge_age_ms(self.timeout)?.is_some() {
+            return Ok(None);
+        }
+        Ok(Some(format!("sem herdr-app nesta máquina e nenhuma janela ouvindo: o Enter do painel não muda o space; {BRIDGE_HELP}")))
+    }
 }
 
 /// Dublê para testes: cria/remove worktrees com git de verdade, sem `--force`.
@@ -775,6 +823,8 @@ pub struct FakeHerdr {
     /// Resposta de `list_agents`.
     pub agents: std::cell::RefCell<Vec<AgentInfo>>,
     pub fail_agents: std::cell::Cell<bool>,
+    /// Resposta de `window_warning`.
+    pub window_warning: std::cell::RefCell<Option<String>>,
     next: std::cell::Cell<u32>,
 }
 
@@ -808,6 +858,7 @@ impl FakeHerdr {
             pane_scan_delay: Default::default(),
             agents: Default::default(),
             fail_agents: Default::default(),
+            window_warning: Default::default(),
             next: std::cell::Cell::new(1),
         }
     }
@@ -937,6 +988,10 @@ impl Herdr for FakeHerdr {
         Self::before(deadline)?;
         self.check("agent list", self.fail_agents.get())?;
         Ok(self.agents.borrow().clone())
+    }
+
+    fn window_warning(&self) -> Result<Option<String>> {
+        Ok(self.window_warning.borrow().clone())
     }
 }
 
@@ -1258,6 +1313,7 @@ mod tests {
         let fake = FakeRunner::new();
         fake.on("doc.get", core_ok(serde_json::json!({ "value": { "space": "rq-0", "at": 1 }, "version": 6 })));
         fake.on("doc.set", core_ok(serde_json::json!({ "version": 7 })));
+        fake.on("reviewq-bridge", beat(5_000));
         remote(&fake).focus_workspace("rq-9", far()).unwrap();
         let calls = fake.calls.borrow();
         assert_eq!(core_req(&calls[0])["params"], serde_json::json!({ "name": "reviewq-focus" }));
@@ -1265,6 +1321,50 @@ mod tests {
         assert_eq!((set["method"].as_str(), set["params"]["name"].as_str(), set["params"]["version"].as_u64()), (Some("doc.set"), Some("reviewq-focus"), Some(6)));
         assert_eq!(set["params"]["value"]["space"], "rq-9");
         assert!(set["params"]["value"]["at"].as_i64().unwrap() > 0);
+    }
+
+    /// Doc do sinal do mod, dado há `ago_ms`.
+    fn beat(ago_ms: i64) -> Output {
+        core_ok(serde_json::json!({ "value": { "at": chrono::Utc::now().timestamp_millis() - ago_ms }, "version": 3 }))
+    }
+
+    fn no_beat() -> Output {
+        core_ok(serde_json::json!({ "value": null, "version": 0 }))
+    }
+
+    #[test]
+    fn remote_focus_without_a_listening_window_keeps_the_request_but_says_so() {
+        for (answer, expected) in [(no_beat(), "nenhuma janela ouve"), (beat(10 * 60_000), "não dá sinal há 10 min")] {
+            let fake = FakeRunner::new();
+            fake.on("\"doc.get\",\"params\":{\"name\":\"reviewq-focus\"", core_ok(serde_json::json!({ "value": null, "version": 0 })));
+            fake.on("doc.set", core_ok(serde_json::json!({ "version": 1 })));
+            fake.on("reviewq-bridge", answer);
+            let err = remote(&fake).focus_workspace("rq-9", far()).unwrap_err().to_string();
+            assert!(err.contains(expected), "{err}");
+            assert!(fake.lines().iter().any(|l| l.contains("doc.set")), "o pedido fica gravado");
+        }
+    }
+
+    #[test]
+    fn window_warning_only_when_no_window_ever_listened() {
+        let fake = FakeRunner::new();
+        fake.on("reviewq-bridge", no_beat());
+        assert!(remote(&fake).window_warning().unwrap().unwrap().contains("mod reviewq-bridge"));
+        let fake = FakeRunner::new();
+        fake.on("reviewq-bridge", beat(60 * 60_000));
+        assert_eq!(remote(&fake).window_warning().unwrap(), None, "janela fechada não é falta de setup");
+        let fake = FakeRunner::new();
+        assert_eq!(app(&fake).window_warning().unwrap(), None);
+        assert!(fake.lines().is_empty());
+    }
+
+    #[test]
+    fn auto_window_is_remote_only_without_the_app_here() {
+        use crate::config::Window;
+        assert!(window_is_remote(Window::Auto, false));
+        assert!(!window_is_remote(Window::Auto, true));
+        assert!(window_is_remote(Window::Remote, true));
+        assert!(!window_is_remote(Window::Local, false));
     }
 
     #[test]
@@ -1314,7 +1414,7 @@ mod tests {
         let fake = FakeRunner::new();
         fake.on("herdr-app ls", Output::ok(&spaces(&[("sp1", "linkana", true)])));
         let cfg = crate::config::Config::parse(
-            "backend = \"herdr-app\"\nworktrees_dir = \"/w\"\n[[repos]]\nname = \"o/r\"\npath = \"/r\"\nsetup = []\n",
+            "backend = \"herdr-app\"\nwindow = \"local\"\nworktrees_dir = \"/w\"\n[[repos]]\nname = \"o/r\"\npath = \"/r\"\nsetup = []\n",
             Path::new("/h"),
         )
         .unwrap();

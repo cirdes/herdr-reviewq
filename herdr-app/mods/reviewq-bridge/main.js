@@ -7,13 +7,17 @@ import { h_flex } from "gpui-base";
 import { exec, machines, run, spaces, theme } from "herdr";
 
 const DOC = "reviewq-focus";
+// Sinal de vida: o reviewq de lá sabe que uma janela o ouve e avisa quando nenhuma ouve.
+const BEAT_DOC = "reviewq-bridge";
 const EVERY_MS = 1000;
+const BEAT_EVERY_MS = 30000;
 // Pedido mais velho que isso (feito com a janela fechada ou a máquina fora) não rouba o foco.
 const FRESH_MS = 30000;
 
-// O pedido vai como argumento do sh, nunca dentro do script.
-async function docGet(machine) {
-  const req = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "doc.get", params: { name: DOC, on: machine } });
+// Uma chamada ao herdr-core daqui, que salta para `on`. O pedido vai como argumento do sh,
+// nunca dentro do script.
+async function core(method, params) {
+  const req = JSON.stringify({ jsonrpc: "2.0", id: 1, method, params });
   const r = await exec("sh", ["-c", 'printf "%s\\n" "$1" | hc connect', "sh", req]);
   if (r.code !== 0) throw new Error(r.stderr.trim() || `hc connect saiu com ${r.code}`);
   const res = JSON.parse(r.stdout);
@@ -21,9 +25,20 @@ async function docGet(machine) {
   return res.result;
 }
 
+// Conflito (outra janela gravou no meio) não é erro: o sinal dela vale tanto quanto o nosso.
+async function beat(machine) {
+  const { version } = await core("doc.get", { name: BEAT_DOC, on: machine });
+  try {
+    await core("doc.set", { name: BEAT_DOC, on: machine, value: { at: Date.now() }, version });
+  } catch (e) {
+    if (!String(e?.message ?? e).includes("conflict")) throw e;
+  }
+}
+
 export default class ReviewqBridge extends View {
   init(_props, cx) {
     this.seen = {}; // máquina -> versão do doc já vista
+    this.beats = {}; // máquina -> quando deu o último sinal
     this.errors = {}; // máquina -> último erro
     this.last = null; // último foco feito: { id, at }
     this.busy = false;
@@ -39,6 +54,10 @@ export default class ReviewqBridge extends View {
       for (const m of machines()) {
         if (m.name === null || m.layout !== "ready") continue;
         try {
+          if (Date.now() - (this.beats[m.name] ?? 0) >= BEAT_EVERY_MS) {
+            await beat(m.name);
+            this.beats[m.name] = Date.now();
+          }
           changed = (await this.check(m.name)) || changed;
           if (this.errors[m.name]) {
             delete this.errors[m.name];
@@ -60,7 +79,7 @@ export default class ReviewqBridge extends View {
 
   // Na primeira leitura de cada máquina só anota a versão: pedido antigo não vira foco.
   async check(machine) {
-    const { value, version } = await docGet(machine);
+    const { value, version } = await core("doc.get", { name: DOC, on: machine });
     const first = !(machine in this.seen);
     if (!first && version === this.seen[machine]) return false;
     this.seen[machine] = version;

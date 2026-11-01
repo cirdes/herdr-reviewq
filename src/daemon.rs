@@ -82,7 +82,13 @@ pub struct Daemon<'a> {
     last_extras: Option<Instant>,
     /// Sync pedido: coleta os extras no próximo tick, fora da cadência.
     pub(crate) extras_requested: bool,
+    last_window_check: Option<Instant>,
+    /// Já alertou que falta algo na janela; volta a alertar só depois de resolvido.
+    window_alerted: bool,
 }
+
+/// Cadência da checagem do que falta na janela (o mod da janela remota).
+const WINDOW_CHECK_EVERY: Duration = Duration::from_secs(300);
 
 /// Prazo total da coleta de extras (agentes, CI e meus PRs) num tick.
 const EXTRAS_BUDGET: Duration = Duration::from_secs(30);
@@ -126,6 +132,8 @@ impl<'a> Daemon<'a> {
             ticked: false,
             last_extras: None,
             extras_requested: false,
+            last_window_check: None,
+            window_alerted: false,
         };
         d.recover_orphan_setup();
         if let Err(e) = d.save() {
@@ -227,6 +235,28 @@ impl<'a> Daemon<'a> {
         self.maybe_collect_reviews_today();
         self.maybe_collect_extras();
         self.maybe_ensure_panel();
+        self.maybe_check_window();
+    }
+
+    /// Um alerta por problema: se some e volta, alerta de novo.
+    pub(crate) fn maybe_check_window(&mut self) {
+        if self.last_window_check.is_some_and(|t| t.elapsed() < WINDOW_CHECK_EVERY) {
+            return;
+        }
+        self.last_window_check = Some(Instant::now());
+        match self.herdr.window_warning() {
+            Ok(Some(m)) if !self.window_alerted => {
+                info(&m);
+                self.state.push_alert(m);
+                self.window_alerted = true;
+                if let Err(e) = self.save() {
+                    info(&format!("{e:#}"));
+                }
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => self.window_alerted = false,
+            Err(e) => info(&format!("checagem da janela: {e:#}")),
+        }
     }
 
     fn snapshot(&self) -> Snapshot {
@@ -1027,6 +1057,34 @@ mod tests {
     }
 
     const VIEWER: &str = r#"{"data":{"viewer":{"login":"cirdes"}}}"#;
+
+    #[test]
+    fn window_warning_alerts_once_per_episode() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        let alerts = |d: &Daemon| d.state.alerts.iter().filter(|a| a.message.contains("janela")).count();
+        let check = |d: &mut Daemon| {
+            d.last_window_check = None;
+            d.maybe_check_window();
+        };
+
+        *herdr.window_warning.borrow_mut() = Some("nenhuma janela ouvindo".into());
+        check(&mut d);
+        check(&mut d);
+        assert_eq!(alerts(&d), 1, "o mesmo problema alerta uma vez");
+
+        *herdr.window_warning.borrow_mut() = None;
+        check(&mut d);
+        *herdr.window_warning.borrow_mut() = Some("nenhuma janela ouvindo".into());
+        check(&mut d);
+        assert_eq!(alerts(&d), 2, "resolvido e de volta: alerta de novo");
+
+        d.maybe_check_window();
+        assert_eq!(alerts(&d), 2, "dentro da cadência não checa");
+    }
 
     #[test]
     fn counter_success_failure_and_midnight() {
