@@ -13,6 +13,9 @@ pub struct Config {
     /// Onde os worktrees viram workspaces: o herdr do terminal (padrão) ou o app desktop.
     #[serde(default)]
     pub backend: Backend,
+    /// Com `herdr-app`: a janela roda nesta máquina (padrão) ou em outra que se conecta a esta.
+    #[serde(default)]
+    pub window: Window,
     #[serde(default = "default_step_timeout")]
     pub step_timeout_secs: u64,
     /// Espera depois que o PR sai da lista antes de remover o worktree.
@@ -34,6 +37,17 @@ pub enum Backend {
     Herdr,
     /// O app desktop (`herdr-app`, com o herdr-core `hc`), com o painel num space.
     HerdrApp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Window {
+    /// O `herdr-app` está nesta máquina e o reviewq fala com ele direto.
+    #[default]
+    Local,
+    /// A janela está em outra máquina, que conecta o herdr-core desta: o reviewq só fala com o
+    /// `hc` daqui, e o mod `reviewq-bridge` daquela janela faz o que só ela faz (focar).
+    Remote,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -136,6 +150,9 @@ impl Config {
         if self.step_timeout_secs < 1 || self.step_timeout_secs > 86400 {
             bail!("step_timeout_secs deve estar entre 1 e 86400");
         }
+        if self.window == Window::Remote && self.backend != Backend::HerdrApp {
+            bail!("window = \"remote\" só vale com backend = \"herdr-app\"");
+        }
         let mut seen = std::collections::BTreeSet::new();
         for repo in &self.repos {
             if !seen.insert(repo.name.as_str()) {
@@ -197,6 +214,15 @@ sound = "done"
         let app = Config::parse(&format!("backend = \"herdr-app\"\n{FULL}"), Path::new("/h")).unwrap();
         assert_eq!(app.backend, Backend::HerdrApp);
         assert!(Config::parse(&format!("backend = \"tmux\"\n{FULL}"), Path::new("/h")).is_err());
+    }
+
+    #[test]
+    fn remote_window_needs_the_desktop_app() {
+        assert_eq!(Config::parse(FULL, Path::new("/h")).unwrap().window, Window::Local);
+        let remote = Config::parse(&format!("backend = \"herdr-app\"\nwindow = \"remote\"\n{FULL}"), Path::new("/h")).unwrap();
+        assert_eq!(remote.window, Window::Remote);
+        assert!(Config::parse(&format!("window = \"remote\"\n{FULL}"), Path::new("/h")).is_err());
+        assert!(Config::parse(&format!("backend = \"herdr-app\"\nwindow = \"longe\"\n{FULL}"), Path::new("/h")).is_err());
     }
 
     #[test]

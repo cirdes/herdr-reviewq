@@ -359,7 +359,11 @@ pub fn client<'a>(
 ) -> Box<dyn Herdr + 'a> {
     match cfg.backend {
         crate::config::Backend::Herdr => Box::new(HerdrCli::routed(runner, routing).with_timeout(timeout)),
-        crate::config::Backend::HerdrApp => Box::new(HerdrApp::new(runner, home.join(".local/bin").join(TUI_BIN)).with_timeout(timeout)),
+        crate::config::Backend::HerdrApp => Box::new(
+            HerdrApp::new(runner, home.join(".local/bin").join(TUI_BIN))
+                .with_timeout(timeout)
+                .remote(cfg.window == crate::config::Window::Remote),
+        ),
     }
 }
 
@@ -367,6 +371,13 @@ pub fn client<'a>(
 const WORKTREE_LABEL: &str = "reviewq.worktree";
 /// Quanto esperar a janela do herdr-app adotar um space recém-criado.
 const ADOPT_WAIT: Duration = Duration::from_secs(3);
+/// Doc do herdr-core onde a janela guarda os spaces desta máquina (nomes, tabs, pastas).
+const SPACES_DOC: &str = "herdr-app";
+/// Doc do herdr-core onde o reviewq pede foco a uma janela remota; o mod `reviewq-bridge`
+/// daquela janela lê e mostra o space.
+const FOCUS_DOC: &str = "reviewq-focus";
+/// Quantas vezes reler um doc que outro processo gravou entre a leitura e a escrita.
+const DOC_RETRIES: usize = 3;
 
 /// Id do space de um worktree: estável para o mesmo caminho, então o daemon e a CLI acham o
 /// mesmo space sem guardar nada além do caminho.
@@ -395,20 +406,109 @@ fn app_json(out: &Output, what: &str) -> Result<Value> {
 /// `herdr.space`), então o daemon cria worktrees com a janela fechada; o que só a janela faz
 /// (listar, nomear e mostrar spaces) passa pelo `herdr-app do`. Workspace aqui é space, e
 /// pane é terminal do herdr-core.
+///
+/// Com a janela em outra máquina (`remote`), não há `herdr-app` aqui: listar, nomear e fechar
+/// spaces viram edições do doc `herdr-app` do herdr-core daqui, que a janela acompanha, e focar
+/// vira um pedido no doc `reviewq-focus`, que o mod `reviewq-bridge` da janela atende.
 pub struct HerdrApp<'a> {
     runner: &'a dyn Runner,
     tui_bin: PathBuf,
     timeout: Duration,
+    remote: bool,
 }
 
 impl<'a> HerdrApp<'a> {
     pub fn new(runner: &'a dyn Runner, tui_bin: PathBuf) -> Self {
-        Self { runner, tui_bin, timeout: Duration::from_secs(60) }
+        Self { runner, tui_bin, timeout: Duration::from_secs(60), remote: false }
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    pub fn remote(mut self, remote: bool) -> Self {
+        self.remote = remote;
+        self
+    }
+
+    /// Uma chamada à API do herdr-core daqui (`hc connect`). O pedido vai como argumento do
+    /// `sh`, nunca dentro do script. O erro de dentro é o `kind` da API (ex.: `conflict`).
+    fn core(&self, method: &str, params: Value, timeout: Duration) -> Result<std::result::Result<Value, String>> {
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+        let cmd = Cmd::new("sh").args(["-c", "printf '%s\\n' \"$1\" | hc connect", "sh"]).arg(req.to_string()).timeout(timeout);
+        let out = self.runner.run(&cmd)?;
+        if !out.success() {
+            bail!("hc {method} falhou: {}", out.stderr.trim());
+        }
+        let v: Value = serde_json::from_str(out.stdout.trim()).with_context(|| format!("resposta inválida de hc {method}: {}", out.stdout.trim()))?;
+        if let Some(err) = v.get("error") {
+            let kind = err.pointer("/data/kind").and_then(Value::as_str).unwrap_or("error");
+            return Ok(Err(format!("{kind}: {}", err.get("message").and_then(Value::as_str).unwrap_or_default())));
+        }
+        v.get("result").cloned().map(Ok).with_context(|| format!("hc {method} sem result"))
+    }
+
+    fn doc_get(&self, name: &str, timeout: Duration) -> Result<(Value, u64)> {
+        let doc = self.core("doc.get", serde_json::json!({ "name": name }), timeout)?.map_err(|e| anyhow!("hc doc.get {name}: {e}"))?;
+        Ok((doc.get("value").cloned().unwrap_or(Value::Null), doc.get("version").and_then(Value::as_u64).unwrap_or(0)))
+    }
+
+    /// Lê, muda e grava um doc só se ninguém gravou no meio; senão relê. `edit` devolve se mudou.
+    fn doc_edit(&self, name: &str, mut edit: impl FnMut(&mut Value) -> Result<bool>) -> Result<()> {
+        for _ in 0..DOC_RETRIES {
+            let (mut value, version) = self.doc_get(name, self.timeout)?;
+            if !edit(&mut value)? {
+                return Ok(());
+            }
+            match self.core("doc.set", serde_json::json!({ "name": name, "value": value, "version": version }), self.timeout)? {
+                Ok(_) => return Ok(()),
+                Err(e) if e.starts_with("conflict:") => continue,
+                Err(e) => bail!("hc doc.set {name}: {e}"),
+            }
+        }
+        bail!("doc {name} mudou {DOC_RETRIES} vezes seguidas enquanto o reviewq gravava")
+    }
+
+    /// Muda os spaces que a janela guarda aqui. Sem o doc, a janela nunca abriu esta máquina.
+    fn edit_spaces(&self, mut edit: impl FnMut(&mut Vec<Value>) -> bool) -> Result<()> {
+        self.doc_edit(SPACES_DOC, |doc| {
+            let spaces = doc.get_mut("spaces").and_then(Value::as_array_mut).context("a janela ainda não abriu os spaces desta máquina")?;
+            Ok(edit(spaces))
+        })
+    }
+
+    fn rename_space(&self, id: &str, name: &str) -> Result<()> {
+        if !self.remote {
+            return self.app("space.rename", serde_json::json!({ "id": id, "name": name }), self.timeout).map(|_| ());
+        }
+        self.edit_spaces(|spaces| {
+            let Some(s) = spaces.iter_mut().find(|s| s.get("id").and_then(Value::as_str) == Some(id)) else { return false };
+            s["name"] = name.into();
+            true
+        })
+    }
+
+    fn close_space(&self, id: &str) -> Result<()> {
+        if !self.remote {
+            return self.app("space.close", serde_json::json!({ "id": id, "confirmed": true }), self.timeout).map(|_| ());
+        }
+        self.edit_spaces(|spaces| {
+            let before = spaces.len();
+            spaces.retain(|s| s.get("id").and_then(Value::as_str) != Some(id));
+            spaces.len() != before
+        })
+    }
+
+    fn select_space(&self, id: &str, timeout: Duration) -> Result<()> {
+        if !self.remote {
+            return self.app("space.select", serde_json::json!({ "id": id }), timeout).map(|_| ());
+        }
+        let at = chrono::Utc::now().timestamp_millis();
+        self.doc_edit(FOCUS_DOC, |doc| {
+            *doc = serde_json::json!({ "space": id, "at": at });
+            Ok(true)
+        })
     }
 
     fn until(&self, deadline: Instant) -> Result<Duration> {
@@ -472,7 +572,7 @@ impl<'a> HerdrApp<'a> {
         loop {
             match self.list_workspaces(Instant::now() + self.timeout) {
                 Ok(list) if list.iter().any(|w| w.id == id) => {
-                    let _ = self.app("space.rename", serde_json::json!({ "id": id, "name": label }), self.timeout);
+                    let _ = self.rename_space(id, label);
                     return;
                 }
                 Ok(_) if Instant::now() < until => std::thread::sleep(Duration::from_millis(100)),
@@ -531,7 +631,7 @@ impl Herdr for HerdrApp<'_> {
             .with_context(|| format!("space {id} sem o label {WORKTREE_LABEL}"))?;
         let common = self.git(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
         let repo = Path::new(common.trim()).parent().context("--git-common-dir sem pai")?.to_path_buf();
-        let _ = self.app("space.close", serde_json::json!({ "id": id, "confirmed": true }), self.timeout);
+        let _ = self.close_space(id);
         for t in self.space_terminals(id, self.timeout)? {
             let out = self.runner.run(&self.hc(self.timeout).args(["kill", &t]))?;
             if !out.success() {
@@ -559,9 +659,13 @@ impl Herdr for HerdrApp<'_> {
         Ok(())
     }
 
+    /// Remoto: os spaces vêm do doc da janela, que não diz qual está em foco (isso é da tela).
     fn list_workspaces(&self, deadline: Instant) -> Result<Vec<WorkspaceInfo>> {
-        let out = self.runner.run(&Cmd::new("herdr-app").arg("ls").timeout(self.until(deadline)?))?;
-        let ls = app_json(&out, "herdr-app ls")?;
+        let ls = if self.remote {
+            self.doc_get(SPACES_DOC, self.until(deadline)?)?.0
+        } else {
+            app_json(&self.runner.run(&Cmd::new("herdr-app").arg("ls").timeout(self.until(deadline)?))?, "herdr-app ls")?
+        };
         Ok(ls
             .get("spaces")
             .and_then(Value::as_array)
@@ -588,7 +692,7 @@ impl Herdr for HerdrApp<'_> {
     }
 
     fn focus_workspace(&self, id: &str, deadline: Instant) -> Result<()> {
-        self.app("space.select", serde_json::json!({ "id": id }), self.until(deadline)?).map(|_| ())
+        self.select_space(id, self.until(deadline)?)
     }
 
     fn list_panes(&self, workspace: &str, deadline: Instant) -> Result<Vec<PaneInfo>> {
@@ -1106,6 +1210,103 @@ mod tests {
 
     fn spaces(ids: &[(&str, &str, bool)]) -> String {
         serde_json::json!({ "spaces": ids.iter().map(|(id, name, active)| serde_json::json!({ "id": id, "name": name, "active": active })).collect::<Vec<_>>() }).to_string()
+    }
+
+    fn remote(fake: &FakeRunner) -> HerdrApp<'_> {
+        app(fake).remote(true)
+    }
+
+    fn core_ok(result: Value) -> Output {
+        Output::ok(&serde_json::json!({ "id": 1, "jsonrpc": "2.0", "result": result }).to_string())
+    }
+
+    fn spaces_doc(version: u64, ids: &[(&str, &str)]) -> Output {
+        let spaces: Vec<Value> = ids.iter().map(|(id, name)| serde_json::json!({ "id": id, "name": name, "folder": "", "tabs": [] })).collect();
+        core_ok(serde_json::json!({ "value": { "spaces": spaces }, "version": version }))
+    }
+
+    /// O pedido JSON-RPC que uma chamada `hc connect` levou.
+    fn core_req(cmd: &Cmd) -> Value {
+        assert_eq!(cmd.args[..2], ["-c".to_string(), "printf '%s\\n' \"$1\" | hc connect".into()]);
+        serde_json::from_str(cmd.args.last().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn client_routes_a_remote_window_through_the_core() {
+        let fake = FakeRunner::new();
+        fake.on("doc.get", spaces_doc(4, &[("rq-1", "#7 título")]));
+        let cfg = crate::config::Config::parse(
+            "backend = \"herdr-app\"\nwindow = \"remote\"\nworktrees_dir = \"/w\"\n[[repos]]\nname = \"o/r\"\npath = \"/r\"\nsetup = []\n",
+            Path::new("/h"),
+        )
+        .unwrap();
+        let routing = UiRouting { bin: "herdr".into(), session: None };
+        let ws = client(&cfg, &fake, &routing, Path::new("/h"), Duration::from_secs(5)).list_workspaces(far()).unwrap();
+        assert_eq!(ws, vec![WorkspaceInfo { id: "rq-1".into(), label: "#7 título".into(), focused: false }]);
+        assert!(fake.lines().iter().all(|l| !l.contains("herdr-app ")), "{:?}", fake.lines());
+    }
+
+    #[test]
+    fn remote_lists_nothing_before_the_window_ever_opened() {
+        let fake = FakeRunner::new();
+        fake.on("doc.get", core_ok(serde_json::json!({ "value": null, "version": 0 })));
+        assert!(remote(&fake).list_workspaces(far()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remote_focus_asks_the_bridge_through_the_focus_doc() {
+        let fake = FakeRunner::new();
+        fake.on("doc.get", core_ok(serde_json::json!({ "value": { "space": "rq-0", "at": 1 }, "version": 6 })));
+        fake.on("doc.set", core_ok(serde_json::json!({ "version": 7 })));
+        remote(&fake).focus_workspace("rq-9", far()).unwrap();
+        let calls = fake.calls.borrow();
+        assert_eq!(core_req(&calls[0])["params"], serde_json::json!({ "name": "reviewq-focus" }));
+        let set = core_req(&calls[1]);
+        assert_eq!((set["method"].as_str(), set["params"]["name"].as_str(), set["params"]["version"].as_u64()), (Some("doc.set"), Some("reviewq-focus"), Some(6)));
+        assert_eq!(set["params"]["value"]["space"], "rq-9");
+        assert!(set["params"]["value"]["at"].as_i64().unwrap() > 0);
+    }
+
+    #[test]
+    fn remote_names_an_adopted_space_in_the_doc_keeping_the_rest_and_rereads_on_conflict() {
+        let fake = FakeRunner::new();
+        let id = space_id(Path::new("/w/o/r/pr-7"));
+        fake.on("git worktree add", Output::ok(""));
+        fake.on("hc run", Output::ok(r#"{"address":"t9"}"#));
+        fake.on("doc.get", spaces_doc(3, &[("sp1", "linkana"), (&id, "")]));
+        fake.on("doc.get", spaces_doc(3, &[("sp1", "linkana"), (&id, "")]));
+        fake.on("doc.set", Output::ok(r#"{"id":1,"jsonrpc":"2.0","error":{"code":-32000,"message":"conflict","data":{"kind":"conflict"}}}"#));
+        fake.on("doc.get", spaces_doc(4, &[("sp1", "linkana"), (&id, ""), ("sp2", "nova")]));
+        fake.on("doc.set", core_ok(serde_json::json!({ "version": 5 })));
+        let req = CreateReq { repo: "/r".into(), branch: "b".into(), base: "origin/b".into(), path: "/w/o/r/pr-7".into(), label: "#7 título".into() };
+        remote(&fake).create_worktree(&req).unwrap();
+        let calls = fake.calls.borrow();
+        let set = core_req(calls.last().unwrap());
+        assert_eq!(set["params"]["version"], 4, "grava sobre a versão relida");
+        let spaces = set["params"]["value"]["spaces"].as_array().unwrap();
+        assert_eq!(spaces.iter().map(|s| s["name"].as_str().unwrap()).collect::<Vec<_>>(), ["linkana", "#7 título", "nova"]);
+        assert_eq!(spaces[1]["tabs"], serde_json::json!([]), "o resto do space fica como a janela gravou");
+        assert!(fake.lines().iter().all(|l| !l.contains("herdr-app ")));
+    }
+
+    #[test]
+    fn remote_remove_drops_the_space_from_the_doc_before_ending_its_terminals() {
+        let fake = FakeRunner::new();
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"live"}]}"#));
+        fake.on("hc get t3", Output::ok(r#"{"address":"t3","labels":{"herdr.space":"rq-1","reviewq.worktree":"/w/o/r/pr-7"}}"#));
+        fake.on("git rev-parse", Output::ok("/r/.git\n"));
+        fake.on("doc.get", spaces_doc(8, &[("sp1", "linkana"), ("rq-1", "#7 título")]));
+        fake.on("doc.set", core_ok(serde_json::json!({ "version": 9 })));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"live"}]}"#));
+        fake.on("hc kill t3", Output::ok(""));
+        fake.on("git worktree remove", Output::ok(""));
+        remote(&fake).remove_worktree("rq-1").unwrap();
+        let lines = fake.lines();
+        let set = lines.iter().position(|l| l.contains("doc.set")).unwrap();
+        assert!(set < lines.iter().position(|l| l.contains("hc kill t3")).unwrap());
+        let req = core_req(&fake.calls.borrow()[set]);
+        assert_eq!(req["params"]["value"]["spaces"].as_array().unwrap().len(), 1);
+        assert_eq!(req["params"]["value"]["spaces"][0]["id"], "sp1");
     }
 
     #[test]

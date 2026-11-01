@@ -141,6 +141,30 @@ Nothing else changes: the daemon, the panel, the keys and the command line are t
 
 The herdr plugin (`herdr-plugin.toml`) is not used by the desktop app; there is no need to link it.
 
+### Window on another machine
+
+The daemon can run on a machine that the window only connects to, such as a Mac mini added with `hc machine add` from your laptop. That machine has no `herdr-app`, and it can't reach the window: the connection goes from the window to it. Tell reviewq so:
+
+```toml
+backend = "herdr-app"
+window  = "remote"
+```
+
+Then reviewq only talks to the herdr-core of its own machine:
+
+- **Listing, naming and closing spaces** edit the `herdr-app` doc in that core, where the window keeps the machine's spaces. A write only lands if nobody wrote in between; otherwise reviewq reads again and retries.
+- **Focusing a PR** (`enter` in the panel, `focus first-ready`) writes `{ space, at }` to the `reviewq-focus` doc. The `reviewq-bridge` mod, installed in the window, reads that doc on every connected machine once a second and shows the space. A request older than 30 seconds, or made before the mod started, is ignored, so an old one never steals the focus.
+- **The panel's focus is not given back** after it opens: the doc doesn't say which space is shown.
+
+Install the mod on the computer with the window:
+
+```sh
+cp -R herdr-app/mods/reviewq-bridge ~/.config/herdr-app/mods/
+herdr-app check ~/.config/herdr-app/mods/reviewq-bridge
+```
+
+It docks a thin bar at the bottom that shows the machines it listens to and the last space it focused, or the error when a machine can't be read.
+
 ## Safety guarantees
 
 - **Only pristine worktrees are removed, and only after the grace period.** Pristine means:
