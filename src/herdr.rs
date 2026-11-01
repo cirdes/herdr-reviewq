@@ -89,6 +89,10 @@ pub trait Herdr {
     fn open_plugin_pane(&self, workspace: &str, target_pane: &str, deadline: Instant) -> Result<()>;
     /// Agentes que o herdr reconhece na sessão (Claude, Codex…), com o diretório de cada um.
     fn list_agents(&self, deadline: Instant) -> Result<Vec<AgentInfo>>;
+    /// O que falta para a janela atender o reviewq, se faltar algo (hoje: o mod da janela remota).
+    fn window_warning(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
 }
 
 pub struct HerdrCli<'a> {
@@ -359,7 +363,12 @@ pub fn client<'a>(
 ) -> Box<dyn Herdr + 'a> {
     match cfg.backend {
         crate::config::Backend::Herdr => Box::new(HerdrCli::routed(runner, routing).with_timeout(timeout)),
-        crate::config::Backend::HerdrApp => Box::new(HerdrApp::new(runner, home.join(".local/bin").join(TUI_BIN)).with_timeout(timeout)),
+        crate::config::Backend::HerdrApp => Box::new(
+            HerdrApp::new(runner, home.join(".local/bin").join(TUI_BIN))
+                .hc_bin(hc_program(home, on_path(HC_BIN)))
+                .with_timeout(timeout)
+                .remote(window_is_remote(cfg.window, on_path(APP_BIN))),
+        ),
     }
 }
 
@@ -367,6 +376,45 @@ pub fn client<'a>(
 const WORKTREE_LABEL: &str = "reviewq.worktree";
 /// Quanto esperar a janela do herdr-app adotar um space recém-criado.
 const ADOPT_WAIT: Duration = Duration::from_secs(3);
+/// Doc do herdr-core onde a janela guarda os spaces desta máquina (nomes, tabs, pastas).
+const SPACES_DOC: &str = "herdr-app";
+/// Doc do herdr-core onde o reviewq pede foco a uma janela remota; o mod `reviewq-bridge`
+/// daquela janela lê e mostra o space.
+const FOCUS_DOC: &str = "reviewq-focus";
+/// Quantas vezes reler um doc que outro processo gravou entre a leitura e a escrita.
+const DOC_RETRIES: usize = 3;
+/// Doc do herdr-core onde o mod `reviewq-bridge` deixa `{ at }` a cada 30 s: há uma janela
+/// remota ouvindo esta máquina.
+const BRIDGE_DOC: &str = "reviewq-bridge";
+/// Sinal do mod mais velho que isso: a janela fechou ou perdeu esta máquina.
+const BRIDGE_FRESH_MS: i64 = 120_000;
+const APP_BIN: &str = "herdr-app";
+const HC_BIN: &str = "hc";
+const BRIDGE_HELP: &str = "instale o mod reviewq-bridge na janela (README, \"Window on another machine\")";
+
+/// `auto`: sem `herdr-app` aqui, a janela só pode estar em outra máquina.
+pub fn window_is_remote(window: crate::config::Window, app_here: bool) -> bool {
+    match window {
+        crate::config::Window::Auto => !app_here,
+        crate::config::Window::Local => false,
+        crate::config::Window::Remote => true,
+    }
+}
+
+/// O `hc` pelo PATH quando ele está lá; senão o de `~/.local/bin`, onde o instalador o põe.
+/// Pelo `hc exec` o PATH é o mínimo do sistema e não tem o `hc`.
+fn hc_program(home: &Path, in_path: bool) -> String {
+    let local = home.join(".local/bin").join(HC_BIN);
+    if in_path || !local.is_file() { HC_BIN.into() } else { local.to_string_lossy().into_owned() }
+}
+
+/// O programa está no PATH deste processo, o mesmo que o runner usa (no daemon, o do launchd).
+fn on_path(program: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|dir| std::fs::metadata(dir.join(program)).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0))
+    })
+}
 
 /// Id do space de um worktree: estável para o mesmo caminho, então o daemon e a CLI acham o
 /// mesmo space sem guardar nada além do caminho.
@@ -395,20 +443,127 @@ fn app_json(out: &Output, what: &str) -> Result<Value> {
 /// `herdr.space`), então o daemon cria worktrees com a janela fechada; o que só a janela faz
 /// (listar, nomear e mostrar spaces) passa pelo `herdr-app do`. Workspace aqui é space, e
 /// pane é terminal do herdr-core.
+///
+/// Com a janela em outra máquina (`remote`), não há `herdr-app` aqui: listar, nomear e fechar
+/// spaces viram edições do doc `herdr-app` do herdr-core daqui, que a janela acompanha, e focar
+/// vira um pedido no doc `reviewq-focus`, que o mod `reviewq-bridge` da janela atende.
 pub struct HerdrApp<'a> {
     runner: &'a dyn Runner,
     tui_bin: PathBuf,
+    hc_bin: String,
     timeout: Duration,
+    remote: bool,
 }
 
 impl<'a> HerdrApp<'a> {
     pub fn new(runner: &'a dyn Runner, tui_bin: PathBuf) -> Self {
-        Self { runner, tui_bin, timeout: Duration::from_secs(60) }
+        Self { runner, tui_bin, hc_bin: HC_BIN.into(), timeout: Duration::from_secs(60), remote: false }
+    }
+
+    pub fn hc_bin(mut self, program: String) -> Self {
+        self.hc_bin = program;
+        self
     }
 
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
         self
+    }
+
+    pub fn remote(mut self, remote: bool) -> Self {
+        self.remote = remote;
+        self
+    }
+
+    /// Uma chamada à API do herdr-core daqui (`hc connect`). O pedido vai como argumento do
+    /// `sh`, nunca dentro do script. O erro de dentro é o `kind` da API (ex.: `conflict`).
+    fn core(&self, method: &str, params: Value, timeout: Duration) -> Result<std::result::Result<Value, String>> {
+        let req = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params });
+        let cmd = Cmd::new("sh").args(["-c", "printf '%s\\n' \"$1\" | hc connect", "sh"]).arg(req.to_string()).timeout(timeout);
+        let out = self.runner.run(&cmd)?;
+        if !out.success() {
+            bail!("hc {method} falhou: {}", out.stderr.trim());
+        }
+        let v: Value = serde_json::from_str(out.stdout.trim()).with_context(|| format!("resposta inválida de hc {method}: {}", out.stdout.trim()))?;
+        if let Some(err) = v.get("error") {
+            let kind = err.pointer("/data/kind").and_then(Value::as_str).unwrap_or("error");
+            return Ok(Err(format!("{kind}: {}", err.get("message").and_then(Value::as_str).unwrap_or_default())));
+        }
+        v.get("result").cloned().map(Ok).with_context(|| format!("hc {method} sem result"))
+    }
+
+    fn doc_get(&self, name: &str, timeout: Duration) -> Result<(Value, u64)> {
+        let doc = self.core("doc.get", serde_json::json!({ "name": name }), timeout)?.map_err(|e| anyhow!("hc doc.get {name}: {e}"))?;
+        Ok((doc.get("value").cloned().unwrap_or(Value::Null), doc.get("version").and_then(Value::as_u64).unwrap_or(0)))
+    }
+
+    /// Lê, muda e grava um doc só se ninguém gravou no meio; senão relê. `edit` devolve se mudou.
+    fn doc_edit(&self, name: &str, mut edit: impl FnMut(&mut Value) -> Result<bool>) -> Result<()> {
+        for _ in 0..DOC_RETRIES {
+            let (mut value, version) = self.doc_get(name, self.timeout)?;
+            if !edit(&mut value)? {
+                return Ok(());
+            }
+            match self.core("doc.set", serde_json::json!({ "name": name, "value": value, "version": version }), self.timeout)? {
+                Ok(_) => return Ok(()),
+                Err(e) if e.starts_with("conflict:") => continue,
+                Err(e) => bail!("hc doc.set {name}: {e}"),
+            }
+        }
+        bail!("doc {name} mudou {DOC_RETRIES} vezes seguidas enquanto o reviewq gravava")
+    }
+
+    /// Muda os spaces que a janela guarda aqui. Sem o doc, a janela nunca abriu esta máquina.
+    fn edit_spaces(&self, mut edit: impl FnMut(&mut Vec<Value>) -> bool) -> Result<()> {
+        self.doc_edit(SPACES_DOC, |doc| {
+            let spaces = doc.get_mut("spaces").and_then(Value::as_array_mut).context("a janela ainda não abriu os spaces desta máquina")?;
+            Ok(edit(spaces))
+        })
+    }
+
+    fn rename_space(&self, id: &str, name: &str) -> Result<()> {
+        if !self.remote {
+            return self.app("space.rename", serde_json::json!({ "id": id, "name": name }), self.timeout).map(|_| ());
+        }
+        self.edit_spaces(|spaces| {
+            let Some(s) = spaces.iter_mut().find(|s| s.get("id").and_then(Value::as_str) == Some(id)) else { return false };
+            s["name"] = name.into();
+            true
+        })
+    }
+
+    fn close_space(&self, id: &str) -> Result<()> {
+        if !self.remote {
+            return self.app("space.close", serde_json::json!({ "id": id, "confirmed": true }), self.timeout).map(|_| ());
+        }
+        self.edit_spaces(|spaces| {
+            let before = spaces.len();
+            spaces.retain(|s| s.get("id").and_then(Value::as_str) != Some(id));
+            spaces.len() != before
+        })
+    }
+
+    fn select_space(&self, id: &str, timeout: Duration) -> Result<()> {
+        if !self.remote {
+            return self.app("space.select", serde_json::json!({ "id": id }), timeout).map(|_| ());
+        }
+        let at = chrono::Utc::now().timestamp_millis();
+        self.doc_edit(FOCUS_DOC, |doc| {
+            *doc = serde_json::json!({ "space": id, "at": at });
+            Ok(true)
+        })?;
+        // O pedido fica gravado de todo jeito; sem ninguém ouvindo, quem apertou Enter precisa saber.
+        match self.bridge_age_ms(timeout)? {
+            Some(age) if age <= BRIDGE_FRESH_MS => Ok(()),
+            Some(age) => bail!("pedido de foco gravado, mas a janela não dá sinal há {} min: está aberta com o mod reviewq-bridge?", age / 60_000),
+            None => bail!("pedido de foco gravado, mas nenhuma janela ouve esta máquina: {BRIDGE_HELP}"),
+        }
+    }
+
+    /// Há quanto tempo o mod deu o último sinal; `None` se nunca deu.
+    fn bridge_age_ms(&self, timeout: Duration) -> Result<Option<i64>> {
+        let (beat, _) = self.doc_get(BRIDGE_DOC, timeout)?;
+        Ok(beat.get("at").and_then(Value::as_i64).map(|at| (chrono::Utc::now().timestamp_millis() - at).max(0)))
     }
 
     fn until(&self, deadline: Instant) -> Result<Duration> {
@@ -420,7 +575,7 @@ impl<'a> HerdrApp<'a> {
     }
 
     fn hc(&self, timeout: Duration) -> Cmd {
-        Cmd::new("hc").timeout(timeout)
+        Cmd::new(&self.hc_bin).timeout(timeout)
     }
 
     fn app(&self, command: &str, args: Value, timeout: Duration) -> Result<Value> {
@@ -472,7 +627,7 @@ impl<'a> HerdrApp<'a> {
         loop {
             match self.list_workspaces(Instant::now() + self.timeout) {
                 Ok(list) if list.iter().any(|w| w.id == id) => {
-                    let _ = self.app("space.rename", serde_json::json!({ "id": id, "name": label }), self.timeout);
+                    let _ = self.rename_space(id, label);
                     return;
                 }
                 Ok(_) if Instant::now() < until => std::thread::sleep(Duration::from_millis(100)),
@@ -531,7 +686,7 @@ impl Herdr for HerdrApp<'_> {
             .with_context(|| format!("space {id} sem o label {WORKTREE_LABEL}"))?;
         let common = self.git(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
         let repo = Path::new(common.trim()).parent().context("--git-common-dir sem pai")?.to_path_buf();
-        let _ = self.app("space.close", serde_json::json!({ "id": id, "confirmed": true }), self.timeout);
+        let _ = self.close_space(id);
         for t in self.space_terminals(id, self.timeout)? {
             let out = self.runner.run(&self.hc(self.timeout).args(["kill", &t]))?;
             if !out.success() {
@@ -559,9 +714,13 @@ impl Herdr for HerdrApp<'_> {
         Ok(())
     }
 
+    /// Remoto: os spaces vêm do doc da janela, que não diz qual está em foco (isso é da tela).
     fn list_workspaces(&self, deadline: Instant) -> Result<Vec<WorkspaceInfo>> {
-        let out = self.runner.run(&Cmd::new("herdr-app").arg("ls").timeout(self.until(deadline)?))?;
-        let ls = app_json(&out, "herdr-app ls")?;
+        let ls = if self.remote {
+            self.doc_get(SPACES_DOC, self.until(deadline)?)?.0
+        } else {
+            app_json(&self.runner.run(&Cmd::new("herdr-app").arg("ls").timeout(self.until(deadline)?))?, "herdr-app ls")?
+        };
         Ok(ls
             .get("spaces")
             .and_then(Value::as_array)
@@ -588,7 +747,7 @@ impl Herdr for HerdrApp<'_> {
     }
 
     fn focus_workspace(&self, id: &str, deadline: Instant) -> Result<()> {
-        self.app("space.select", serde_json::json!({ "id": id }), self.until(deadline)?).map(|_| ())
+        self.select_space(id, self.until(deadline)?)
     }
 
     fn list_panes(&self, workspace: &str, deadline: Instant) -> Result<Vec<PaneInfo>> {
@@ -637,6 +796,14 @@ impl Herdr for HerdrApp<'_> {
         }
         Ok(out)
     }
+
+    /// Só o "nunca deu sinal" vira aviso: janela fechada ou dormindo é normal e não deve alertar.
+    fn window_warning(&self) -> Result<Option<String>> {
+        if !self.remote || self.bridge_age_ms(self.timeout)?.is_some() {
+            return Ok(None);
+        }
+        Ok(Some(format!("sem herdr-app nesta máquina e nenhuma janela ouvindo: o Enter do painel não muda o space; {BRIDGE_HELP}")))
+    }
 }
 
 /// Dublê para testes: cria/remove worktrees com git de verdade, sem `--force`.
@@ -671,6 +838,8 @@ pub struct FakeHerdr {
     /// Resposta de `list_agents`.
     pub agents: std::cell::RefCell<Vec<AgentInfo>>,
     pub fail_agents: std::cell::Cell<bool>,
+    /// Resposta de `window_warning`.
+    pub window_warning: std::cell::RefCell<Option<String>>,
     next: std::cell::Cell<u32>,
 }
 
@@ -704,6 +873,7 @@ impl FakeHerdr {
             pane_scan_delay: Default::default(),
             agents: Default::default(),
             fail_agents: Default::default(),
+            window_warning: Default::default(),
             next: std::cell::Cell::new(1),
         }
     }
@@ -833,6 +1003,10 @@ impl Herdr for FakeHerdr {
         Self::before(deadline)?;
         self.check("agent list", self.fail_agents.get())?;
         Ok(self.agents.borrow().clone())
+    }
+
+    fn window_warning(&self) -> Result<Option<String>> {
+        Ok(self.window_warning.borrow().clone())
     }
 }
 
@@ -1108,12 +1282,165 @@ mod tests {
         serde_json::json!({ "spaces": ids.iter().map(|(id, name, active)| serde_json::json!({ "id": id, "name": name, "active": active })).collect::<Vec<_>>() }).to_string()
     }
 
+    fn remote(fake: &FakeRunner) -> HerdrApp<'_> {
+        app(fake).remote(true)
+    }
+
+    fn core_ok(result: Value) -> Output {
+        Output::ok(&serde_json::json!({ "id": 1, "jsonrpc": "2.0", "result": result }).to_string())
+    }
+
+    fn spaces_doc(version: u64, ids: &[(&str, &str)]) -> Output {
+        let spaces: Vec<Value> = ids.iter().map(|(id, name)| serde_json::json!({ "id": id, "name": name, "folder": "", "tabs": [] })).collect();
+        core_ok(serde_json::json!({ "value": { "spaces": spaces }, "version": version }))
+    }
+
+    /// O pedido JSON-RPC que uma chamada `hc connect` levou.
+    fn core_req(cmd: &Cmd) -> Value {
+        assert_eq!(cmd.args[..2], ["-c".to_string(), "printf '%s\\n' \"$1\" | hc connect".into()]);
+        serde_json::from_str(cmd.args.last().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn client_routes_a_remote_window_through_the_core() {
+        let fake = FakeRunner::new();
+        fake.on("doc.get", spaces_doc(4, &[("rq-1", "#7 título")]));
+        let cfg = crate::config::Config::parse(
+            "backend = \"herdr-app\"\nwindow = \"remote\"\nworktrees_dir = \"/w\"\n[[repos]]\nname = \"o/r\"\npath = \"/r\"\nsetup = []\n",
+            Path::new("/h"),
+        )
+        .unwrap();
+        let routing = UiRouting { bin: "herdr".into(), session: None };
+        let ws = client(&cfg, &fake, &routing, Path::new("/h"), Duration::from_secs(5)).list_workspaces(far()).unwrap();
+        assert_eq!(ws, vec![WorkspaceInfo { id: "rq-1".into(), label: "#7 título".into(), focused: false }]);
+        assert!(fake.lines().iter().all(|l| !l.contains("herdr-app ")), "{:?}", fake.lines());
+    }
+
+    #[test]
+    fn remote_lists_nothing_before_the_window_ever_opened() {
+        let fake = FakeRunner::new();
+        fake.on("doc.get", core_ok(serde_json::json!({ "value": null, "version": 0 })));
+        assert!(remote(&fake).list_workspaces(far()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn remote_focus_asks_the_bridge_through_the_focus_doc() {
+        let fake = FakeRunner::new();
+        fake.on("doc.get", core_ok(serde_json::json!({ "value": { "space": "rq-0", "at": 1 }, "version": 6 })));
+        fake.on("doc.set", core_ok(serde_json::json!({ "version": 7 })));
+        fake.on("reviewq-bridge", beat(5_000));
+        remote(&fake).focus_workspace("rq-9", far()).unwrap();
+        let calls = fake.calls.borrow();
+        assert_eq!(core_req(&calls[0])["params"], serde_json::json!({ "name": "reviewq-focus" }));
+        let set = core_req(&calls[1]);
+        assert_eq!((set["method"].as_str(), set["params"]["name"].as_str(), set["params"]["version"].as_u64()), (Some("doc.set"), Some("reviewq-focus"), Some(6)));
+        assert_eq!(set["params"]["value"]["space"], "rq-9");
+        assert!(set["params"]["value"]["at"].as_i64().unwrap() > 0);
+    }
+
+    /// Doc do sinal do mod, dado há `ago_ms`.
+    fn beat(ago_ms: i64) -> Output {
+        core_ok(serde_json::json!({ "value": { "at": chrono::Utc::now().timestamp_millis() - ago_ms }, "version": 3 }))
+    }
+
+    fn no_beat() -> Output {
+        core_ok(serde_json::json!({ "value": null, "version": 0 }))
+    }
+
+    #[test]
+    fn remote_focus_without_a_listening_window_keeps_the_request_but_says_so() {
+        for (answer, expected) in [(no_beat(), "nenhuma janela ouve"), (beat(10 * 60_000), "não dá sinal há 10 min")] {
+            let fake = FakeRunner::new();
+            fake.on("\"doc.get\",\"params\":{\"name\":\"reviewq-focus\"", core_ok(serde_json::json!({ "value": null, "version": 0 })));
+            fake.on("doc.set", core_ok(serde_json::json!({ "version": 1 })));
+            fake.on("reviewq-bridge", answer);
+            let err = remote(&fake).focus_workspace("rq-9", far()).unwrap_err().to_string();
+            assert!(err.contains(expected), "{err}");
+            assert!(fake.lines().iter().any(|l| l.contains("doc.set")), "o pedido fica gravado");
+        }
+    }
+
+    #[test]
+    fn window_warning_only_when_no_window_ever_listened() {
+        let fake = FakeRunner::new();
+        fake.on("reviewq-bridge", no_beat());
+        assert!(remote(&fake).window_warning().unwrap().unwrap().contains("mod reviewq-bridge"));
+        let fake = FakeRunner::new();
+        fake.on("reviewq-bridge", beat(60 * 60_000));
+        assert_eq!(remote(&fake).window_warning().unwrap(), None, "janela fechada não é falta de setup");
+        let fake = FakeRunner::new();
+        assert_eq!(app(&fake).window_warning().unwrap(), None);
+        assert!(fake.lines().is_empty());
+    }
+
+    #[test]
+    fn auto_window_is_remote_only_without_the_app_here() {
+        use crate::config::Window;
+        assert!(window_is_remote(Window::Auto, false));
+        assert!(!window_is_remote(Window::Auto, true));
+        assert!(window_is_remote(Window::Remote, true));
+        assert!(!window_is_remote(Window::Local, false));
+    }
+
+    #[test]
+    fn hc_comes_from_the_path_or_from_local_bin_when_the_path_lacks_it() {
+        let home = tempfile::tempdir().unwrap();
+        assert_eq!(hc_program(home.path(), false), "hc");
+        let bin = home.path().join(".local/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(bin.join("hc"), "").unwrap();
+        assert_eq!(hc_program(home.path(), true), "hc");
+        assert_eq!(hc_program(home.path(), false), bin.join("hc").to_string_lossy());
+    }
+
+    #[test]
+    fn remote_names_an_adopted_space_in_the_doc_keeping_the_rest_and_rereads_on_conflict() {
+        let fake = FakeRunner::new();
+        let id = space_id(Path::new("/w/o/r/pr-7"));
+        fake.on("git worktree add", Output::ok(""));
+        fake.on("hc run", Output::ok(r#"{"address":"t9"}"#));
+        fake.on("doc.get", spaces_doc(3, &[("sp1", "linkana"), (&id, "")]));
+        fake.on("doc.get", spaces_doc(3, &[("sp1", "linkana"), (&id, "")]));
+        fake.on("doc.set", Output::ok(r#"{"id":1,"jsonrpc":"2.0","error":{"code":-32000,"message":"conflict","data":{"kind":"conflict"}}}"#));
+        fake.on("doc.get", spaces_doc(4, &[("sp1", "linkana"), (&id, ""), ("sp2", "nova")]));
+        fake.on("doc.set", core_ok(serde_json::json!({ "version": 5 })));
+        let req = CreateReq { repo: "/r".into(), branch: "b".into(), base: "origin/b".into(), path: "/w/o/r/pr-7".into(), label: "#7 título".into() };
+        remote(&fake).create_worktree(&req).unwrap();
+        let calls = fake.calls.borrow();
+        let set = core_req(calls.last().unwrap());
+        assert_eq!(set["params"]["version"], 4, "grava sobre a versão relida");
+        let spaces = set["params"]["value"]["spaces"].as_array().unwrap();
+        assert_eq!(spaces.iter().map(|s| s["name"].as_str().unwrap()).collect::<Vec<_>>(), ["linkana", "#7 título", "nova"]);
+        assert_eq!(spaces[1]["tabs"], serde_json::json!([]), "o resto do space fica como a janela gravou");
+        assert!(fake.lines().iter().all(|l| !l.contains("herdr-app ")));
+    }
+
+    #[test]
+    fn remote_remove_drops_the_space_from_the_doc_before_ending_its_terminals() {
+        let fake = FakeRunner::new();
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"live"}]}"#));
+        fake.on("hc get t3", Output::ok(r#"{"address":"t3","labels":{"herdr.space":"rq-1","reviewq.worktree":"/w/o/r/pr-7"}}"#));
+        fake.on("git rev-parse", Output::ok("/r/.git\n"));
+        fake.on("doc.get", spaces_doc(8, &[("sp1", "linkana"), ("rq-1", "#7 título")]));
+        fake.on("doc.set", core_ok(serde_json::json!({ "version": 9 })));
+        fake.on("hc ls", Output::ok(r#"{"terminals":[{"address":"t3","state":"live"}]}"#));
+        fake.on("hc kill t3", Output::ok(""));
+        fake.on("git worktree remove", Output::ok(""));
+        remote(&fake).remove_worktree("rq-1").unwrap();
+        let lines = fake.lines();
+        let set = lines.iter().position(|l| l.contains("doc.set")).unwrap();
+        assert!(set < lines.iter().position(|l| l.contains("hc kill t3")).unwrap());
+        let req = core_req(&fake.calls.borrow()[set]);
+        assert_eq!(req["params"]["value"]["spaces"].as_array().unwrap().len(), 1);
+        assert_eq!(req["params"]["value"]["spaces"][0]["id"], "sp1");
+    }
+
     #[test]
     fn client_follows_the_configured_backend() {
         let fake = FakeRunner::new();
         fake.on("herdr-app ls", Output::ok(&spaces(&[("sp1", "linkana", true)])));
         let cfg = crate::config::Config::parse(
-            "backend = \"herdr-app\"\nworktrees_dir = \"/w\"\n[[repos]]\nname = \"o/r\"\npath = \"/r\"\nsetup = []\n",
+            "backend = \"herdr-app\"\nwindow = \"local\"\nworktrees_dir = \"/w\"\n[[repos]]\nname = \"o/r\"\npath = \"/r\"\nsetup = []\n",
             Path::new("/h"),
         )
         .unwrap();
