@@ -125,11 +125,18 @@ Logs live in `~/.local/state/herdr-reviewq/`: `daemon.log`, plus one redacted se
 
 ## Herdr desktop app
 
-reviewq also runs on the Herdr desktop app (`herdr-app`, with herdr-core `hc`). Set it in the config and restart the daemon:
+reviewq also runs on the Herdr desktop app (`herdr-app`, with herdr-core `hc`). By default (`backend = "auto"`) it works out which one you use:
+
+- **The panel and the actions** (`ui open`, `focus first-ready`) look at where they run: `HERDR_ENV=1` means a herdr pane, `HC_TERMINAL_ID` means a herdr-app terminal.
+- **The daemon** runs under launchd, without that environment, so at start it checks, in order: a desktop window listening to this machine (the `reviewq-bridge` mod signalled in the last 2 minutes), then a herdr server that answers, then `herdr-app` on the `PATH`. Both can run on the same machine, so the listening window wins over a herdr server that is merely up. If none of them is there yet (right after login, say), the daemon waits and checks again every 10 seconds. `daemon.log` says which one it picked and why.
+
+The daemon keeps its choice until it restarts, because the workspace ids it stores belong to one backend. If you switch between the two, restart it with `herdr-reviewq service restart`. To skip the detection, set the backend in the config and restart the daemon:
 
 ```toml
-backend = "herdr-app"
+backend = "herdr-app" # or "herdr"
 ```
+
+A backend set in the config wins everywhere, including in the panel.
 
 Nothing else changes: the daemon, the panel, the keys and the command line are the same. What differs is how each step reaches Herdr:
 
@@ -143,7 +150,7 @@ The herdr plugin (`herdr-plugin.toml`) is not used by the desktop app; there is 
 
 ### Window on another machine
 
-The daemon can run on a machine that the window only connects to, such as a Mac mini added with `hc machine add` from your laptop. That machine has no `herdr-app`, and it can't reach the window: the connection goes from the window to it. reviewq notices on its own: with `backend = "herdr-app"` and no `herdr-app` in its `PATH`, it treats the window as remote. To force one mode, set `window = "local"` or `window = "remote"`.
+The daemon can run on a machine that the window only connects to, such as a Mac mini added with `hc machine add` from your laptop. That machine has no `herdr-app`, and it can't reach the window: the connection goes from the window to it. reviewq notices on its own: with the desktop app as backend (set or detected) and no `herdr-app` in its `PATH`, it treats the window as remote. To force one mode, set `window = "local"` or `window = "remote"`.
 
 With a remote window, reviewq only talks to the herdr-core of its own machine:
 
