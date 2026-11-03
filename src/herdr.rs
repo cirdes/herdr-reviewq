@@ -138,6 +138,8 @@ struct ProcessInfo {
 
 #[derive(Deserialize)]
 struct ForegroundProcess {
+    /// O herdr omite `argv` de processos que reescrevem o título (ex.: `node` de MCP).
+    #[serde(default)]
     argv: Vec<String>,
 }
 
@@ -1170,6 +1172,26 @@ mod tests {
         assert!(fake.lines()[0].contains("pane list --workspace w5"), "{}", fake.lines()[0]);
     }
 
+    /// O herdr 0.9.3 omite `argv` de processos que reescrevem o título (ex.: `node` de um MCP).
+    #[test]
+    fn list_panes_tolerates_process_without_argv() {
+        let fake = FakeRunner::new();
+        fake.on("pane list", Output::ok(r#"{"result":{"panes":[{"pane_id":"w5:p1","workspace_id":"w5"}]}}"#));
+        fake.on(
+            "process-info",
+            Output::ok(r#"{"result":{"process_info":{"foreground_processes":[
+                {"pid":1,"name":"node","argv0":"chrome-devtools-mcp"},
+                {"pid":2,"name":"herdr-reviewq","argv":["herdr-reviewq","tui"]}]}}}"#),
+        );
+        let panes = HerdrCli::new(&fake, None).list_panes("w5", far()).unwrap();
+        assert!(panes[0].is_reviewq_tui);
+
+        let fake = FakeRunner::new();
+        fake.on("pane list", Output::ok(r#"{"result":{"panes":[{"pane_id":"w5:p1","workspace_id":"w5"}]}}"#));
+        fake.on("process-info", Output::ok(r#"{"result":{"process_info":{"foreground_processes":[{"pid":1,"name":"node"}]}}}"#));
+        assert!(!HerdrCli::new(&fake, None).list_panes("w5", far()).unwrap()[0].is_reviewq_tui);
+    }
+
     #[test]
     fn list_panes_rejects_incomplete_json() {
         let fake = FakeRunner::new();
@@ -1179,11 +1201,6 @@ mod tests {
         let fake = FakeRunner::new();
         fake.on("pane list", Output::ok(r#"{"result":{"panes":[{"pane_id":"w5:p1","workspace_id":"w5"}]}}"#));
         fake.on("process-info", Output::ok(r#"{"result":{"process_info":{"pane_id":"w5:p1"}}}"#));
-        assert!(HerdrCli::new(&fake, None).list_panes("w5", far()).is_err());
-
-        let fake = FakeRunner::new();
-        fake.on("pane list", Output::ok(r#"{"result":{"panes":[{"pane_id":"w5:p1","workspace_id":"w5"}]}}"#));
-        fake.on("process-info", Output::ok(r#"{"result":{"process_info":{"foreground_processes":[{"pid":1,"name":"x"}]}}}"#));
         assert!(HerdrCli::new(&fake, None).list_panes("w5", far()).is_err());
 
         let fake = FakeRunner::new();
