@@ -866,7 +866,7 @@ pub fn run(paths: Paths) -> Result<()> {
     crate::applog::init(paths.log_file());
     let lock = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(paths.lock_file())?;
     lock.try_lock_exclusive().context("outro daemon já está rodando (daemon.lock)")?;
-    let cfg = Config::load(&paths.config_file, &paths.home)?;
+    let mut cfg = Config::load(&paths.config_file, &paths.home)?;
     unsafe {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_signal as *const () as libc::sighandler_t);
@@ -874,6 +874,35 @@ pub fn run(paths: Paths) -> Result<()> {
     let runner = RealRunner;
     // o painel usa a sessão da config (nunca o ambiente) com timeout curto por chamada
     let routing = UiRouting { bin: "herdr".into(), session: cfg.herdr_session.clone() };
+    // A escolha vale até o daemon reiniciar: os ids dos workspaces no estado são de um backend só.
+    // No login o Herdr pode ainda não estar de pé; sem sinal nenhum, espera em vez de chutar.
+    let mut waiting_logged = false;
+    let why = loop {
+        let mut probe = cfg.clone();
+        if let Some(why) = crate::herdr::resolve_backend(&mut probe, &runner, &routing, &paths.home, false) {
+            cfg = probe;
+            break why;
+        }
+        if stopping() {
+            info("daemon encerrado antes de achar um Herdr");
+            return Ok(());
+        }
+        if !waiting_logged {
+            info("backend auto: nenhum Herdr de pé nem janela ouvindo; esperando um aparecer");
+            waiting_logged = true;
+        }
+        for _ in 0..10 {
+            if stopping() {
+                break;
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    };
+    let backend = match cfg.backend {
+        crate::config::Backend::HerdrApp => "herdr-app",
+        _ => "herdr",
+    };
+    info(&format!("backend {backend} ({why})"));
     let herdr = crate::herdr::client(&cfg, &runner, &routing, &paths.home, Duration::from_secs(60));
     let ui_herdr = crate::herdr::client(&cfg, &runner, &routing, &paths.home, crate::ui::UI_CALL_TIMEOUT);
     let mut d = Daemon::new(paths, cfg, &runner, herdr.as_ref(), mise_wrap)?.with_ui_herdr(ui_herdr.as_ref());

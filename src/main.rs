@@ -113,9 +113,12 @@ fn main() -> Result<()> {
         },
         Command::Tui => herdr_reviewq::tui::run::run_logged(paths.clone(), || load_cfg(&paths)),
         Command::Ui { action } => {
-            let cfg = load_cfg(&paths);
             let runner = RealRunner;
+            let mut cfg = load_cfg(&paths);
             let routing = UiRouting::from_process_env(cfg.as_ref().ok().and_then(|c| c.herdr_session.clone()));
+            if let Ok(c) = cfg.as_mut() {
+                herdr::resolve_backend(c, &runner, &routing, &paths.home, true);
+            }
             let client: Box<dyn Herdr> = match cfg.as_ref() {
                 Ok(c) => herdr::client(c, &runner, &routing, &paths.home, ui::UI_CALL_TIMEOUT),
                 Err(_) => Box::new(HerdrCli::routed(&runner, &routing).with_timeout(ui::UI_CALL_TIMEOUT)),
@@ -133,9 +136,12 @@ fn main() -> Result<()> {
             }
         }
         Command::Focus { target: FocusTarget::FirstReady } => {
-            let cfg = load_cfg(&paths);
             let runner = RealRunner;
+            let mut cfg = load_cfg(&paths);
             let routing = UiRouting::from_process_env(cfg.as_ref().ok().and_then(|c| c.herdr_session.clone()));
+            if let Ok(c) = cfg.as_mut() {
+                herdr::resolve_backend(c, &runner, &routing, &paths.home, true);
+            }
             let client: Box<dyn Herdr> = match cfg.as_ref() {
                 Ok(c) => herdr::client(c, &runner, &routing, &paths.home, ui::UI_CALL_TIMEOUT),
                 Err(_) => Box::new(HerdrCli::routed(&runner, &routing).with_timeout(ui::UI_CALL_TIMEOUT)),

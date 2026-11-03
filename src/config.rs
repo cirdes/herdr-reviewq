@@ -10,7 +10,8 @@ pub struct Config {
     pub worktrees_dir: PathBuf,
     #[serde(default)]
     pub herdr_session: Option<String>,
-    /// Onde os worktrees viram workspaces: o herdr do terminal (padrão) ou o app desktop.
+    /// Onde os worktrees viram workspaces: o herdr do terminal, o app desktop ou `auto` (padrão),
+    /// que decide pelo ambiente do painel e pelo que está de pé nesta máquina.
     #[serde(default)]
     pub backend: Backend,
     /// Com `herdr-app`: a janela roda nesta máquina ou em outra que se conecta a esta. O padrão
@@ -33,8 +34,10 @@ pub struct Config {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Backend {
-    /// `herdr`, o multiplexador de terminal, com o painel como plugin.
+    /// Decide sozinho (`herdr::resolve_backend`); nunca chega resolvido a um cliente.
     #[default]
+    Auto,
+    /// `herdr`, o multiplexador de terminal, com o painel como plugin.
     Herdr,
     /// O app desktop (`herdr-app`, com o herdr-core `hc`), com o painel num space.
     HerdrApp,
@@ -153,8 +156,8 @@ impl Config {
         if self.step_timeout_secs < 1 || self.step_timeout_secs > 86400 {
             bail!("step_timeout_secs deve estar entre 1 e 86400");
         }
-        if self.window != Window::Auto && self.backend != Backend::HerdrApp {
-            bail!("window só vale com backend = \"herdr-app\"");
+        if self.window != Window::Auto && self.backend == Backend::Herdr {
+            bail!("window só vale com backend = \"herdr-app\" ou \"auto\"");
         }
         let mut seen = std::collections::BTreeSet::new();
         for repo in &self.repos {
@@ -195,7 +198,7 @@ sound = "done"
         assert_eq!(cfg.step_timeout_secs, 900);
         assert_eq!(cfg.remove_grace_secs, 900);
         assert!(cfg.herdr_session.is_none());
-        assert_eq!(cfg.backend, Backend::Herdr);
+        assert_eq!(cfg.backend, Backend::Auto);
         assert!(cfg.repo("acme/app").is_some());
         assert!(cfg.repo("outro/repo").is_none());
     }
@@ -216,6 +219,10 @@ sound = "done"
     fn backend_selects_the_desktop_app_and_rejects_unknown_values() {
         let app = Config::parse(&format!("backend = \"herdr-app\"\n{FULL}"), Path::new("/h")).unwrap();
         assert_eq!(app.backend, Backend::HerdrApp);
+        let tui = Config::parse(&format!("backend = \"herdr\"\n{FULL}"), Path::new("/h")).unwrap();
+        assert_eq!(tui.backend, Backend::Herdr);
+        let auto = Config::parse(&format!("backend = \"auto\"\n{FULL}"), Path::new("/h")).unwrap();
+        assert_eq!(auto.backend, Backend::Auto);
         assert!(Config::parse(&format!("backend = \"tmux\"\n{FULL}"), Path::new("/h")).is_err());
     }
 
@@ -224,8 +231,10 @@ sound = "done"
         assert_eq!(Config::parse(FULL, Path::new("/h")).unwrap().window, Window::Auto);
         let remote = Config::parse(&format!("backend = \"herdr-app\"\nwindow = \"remote\"\n{FULL}"), Path::new("/h")).unwrap();
         assert_eq!(remote.window, Window::Remote);
-        assert!(Config::parse(&format!("window = \"remote\"\n{FULL}"), Path::new("/h")).is_err());
-        assert!(Config::parse(&format!("window = \"local\"\n{FULL}"), Path::new("/h")).is_err());
+        // sem backend é `auto`, que pode virar o app: window vale
+        assert!(Config::parse(&format!("window = \"remote\"\n{FULL}"), Path::new("/h")).is_ok());
+        assert!(Config::parse(&format!("backend = \"herdr\"\nwindow = \"remote\"\n{FULL}"), Path::new("/h")).is_err());
+        assert!(Config::parse(&format!("backend = \"herdr\"\nwindow = \"local\"\n{FULL}"), Path::new("/h")).is_err());
         assert!(Config::parse(&format!("backend = \"herdr-app\"\nwindow = \"longe\"\n{FULL}"), Path::new("/h")).is_err());
     }
 

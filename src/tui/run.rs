@@ -365,6 +365,9 @@ fn spawn_worker(cfg: Config, paths: Paths) -> (ActionQueue, mpsc::Receiver<Strin
         .spawn(move || {
             let runner = RealRunner;
             let routing = UiRouting::from_process_env(cfg.herdr_session.clone());
+            // o painel sabe onde roda: o Enter usa o Herdr deste pane, não um palpite
+            let mut cfg = cfg;
+            crate::herdr::resolve_backend(&mut cfg, &runner, &routing, &paths.home, true);
             let herdr = crate::herdr::client(&cfg, &runner, &routing, &paths.home, UI_CALL_TIMEOUT);
             let ctx = WorkerCtx {
                 herdr: herdr.as_ref(),
