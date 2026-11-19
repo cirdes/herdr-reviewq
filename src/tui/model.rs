@@ -84,7 +84,8 @@ pub struct Row {
     pub stack: String,
     pub url: String,
     pub eligible: Eligibility,
-    /// Texto normalizado (`fold`) onde a busca procura: rótulo, `#n`, repo, autor, título e branch.
+    /// Texto normalizado (`fold`) onde a busca procura: `repo#n`, `#n`, autor, título e branch,
+    /// separados por `FIELD` para um termo nunca casar letras de campos diferentes.
     pub search: String,
 }
 
@@ -216,7 +217,18 @@ impl View {
         // A linha em confirmação (y/n) fica mesmo sem casar: uma releitura que mude o título não
         // pode cancelar o pedido como se o PR tivesse mudado de estado.
         let confirming = ui.confirm.as_ref().map(|(_, k)| RowId::Review(k.clone()));
-        rows.retain(|t| matches(&t.3.search, &terms) || confirming.as_ref() == Some(&t.3.id));
+        let mut scored: Vec<(i64, (Section, u8, i64, Row))> = rows
+            .into_iter()
+            .filter_map(|t| {
+                let held = confirming.as_ref() == Some(&t.3.id);
+                score(&t.3.search, &terms).or(held.then_some(0)).map(|n| (if held { i64::MAX } else { n }, t))
+            })
+            .collect();
+        // Com busca, o que casa melhor sobe dentro da própria seção; empate mantém a ordem de sempre.
+        if !terms.is_empty() {
+            scored.sort_by_key(|(n, t)| (t.0, std::cmp::Reverse(*n)));
+        }
+        let rows: Vec<(Section, u8, i64, Row)> = scored.into_iter().map(|(_, t)| t).collect();
         let filtered = (!terms.is_empty()).then_some((rows.len(), total));
         let empty_reason = match filtered {
             Some((0, _)) => Some(format!("nenhum PR casa com \"{}\" (esc limpa a busca)", ui.filter.trim())),
@@ -293,8 +305,12 @@ pub fn fold(s: &str) -> String {
         .collect()
 }
 
+/// Separa os campos do texto de busca; não aparece em nenhum campo.
+const FIELD: char = '\u{1f}';
+
 fn haystack(key: &PrKey, author: &str, title: &str, branch: &str) -> String {
-    fold(&format!("{key} #{} {author} {title} {branch}", key.number))
+    let fields = [key.to_string(), format!("#{}", key.number), author.into(), title.into(), branch.into()];
+    fold(&fields.join(&FIELD.to_string()))
 }
 
 /// Termos da busca separados por espaço; todos precisam casar.
@@ -302,8 +318,33 @@ fn terms(filter: &str) -> Vec<String> {
     fold(filter).split_whitespace().map(str::to_string).collect()
 }
 
-fn matches(search: &str, terms: &[String]) -> bool {
-    terms.iter().all(|t| search.contains(t.as_str()))
+/// Pontuação da linha para a busca, ou `None` se algum termo não casa. Cada termo vale o melhor
+/// campo em que casa; os termos somam.
+fn score(search: &str, terms: &[String]) -> Option<i64> {
+    terms.iter().map(|t| search.split(FIELD).filter_map(|f| fuzzy(t, f)).max()).sum()
+}
+
+/// Casa `term` com `field` de forma aproximada: as letras na ordem, com buracos. Trecho contínuo
+/// vale bem mais, e começo de palavra e letras seguidas somam, para `imp` preferir
+/// "importação" a um título que só espalha essas letras.
+fn fuzzy(term: &str, field: &str) -> Option<i64> {
+    let word_start = |c: Option<char>| c.is_none_or(|c| !c.is_alphanumeric());
+    if let Some(at) = field.find(term) {
+        let bonus = if word_start(field[..at].chars().next_back()) { 200 } else { 0 };
+        return Some(1000 + 10 * term.chars().count() as i64 - (at.min(500) / 10) as i64 + bonus);
+    }
+    let chars: Vec<char> = field.chars().collect();
+    let (mut total, mut from, mut last) = (0, 0, None);
+    for c in term.chars() {
+        let i = (from..chars.len()).find(|&i| chars[i] == c)?;
+        total += if last.is_some_and(|l: usize| l + 1 == i) { 5 } else { 1 };
+        if word_start(i.checked_sub(1).map(|j| chars[j])) {
+            total += 3;
+        }
+        last = Some(i);
+        from = i + 1;
+    }
+    Some(total)
 }
 
 fn phase_rank(p: &Phase) -> u8 {
@@ -903,6 +944,26 @@ mod tests {
         assert_eq!(ids_for("importacao").0, vec![rid(101)], "sem acento casa com acento");
         assert_eq!(ids_for("TELA").0, vec![rid(102)]);
         assert_eq!(ids_for("alice").0, vec![rid(101)]);
+    }
+
+    #[test]
+    fn filter_is_fuzzy_inside_one_field() {
+        assert_eq!(ids_for("crgimp").0, vec![rid(101)], "letras na ordem, com buracos");
+        assert_eq!(ids_for("eng4321").0, vec![rid(101)], "sem o hífen da branch");
+        assert_eq!(ids_for("101alice").0, Vec::<RowId>::new(), "não junta número e autor");
+    }
+
+    #[test]
+    fn filter_ranks_contiguous_match_first_inside_a_section() {
+        assert_eq!(ids_for("").0[..2], [rid(101), rid(102)], "sem busca, ordem de chegada");
+        assert_eq!(ids_for("ra").0[..2], [rid(102), rid(101)], "\"outra\" na branch vence letras espalhadas no título");
+    }
+
+    #[test]
+    fn fuzzy_scores() {
+        assert!(fuzzy("imp", "importacao").unwrap() > fuzzy("imp", "i am pronto").unwrap());
+        assert!(fuzzy("tela", "nova tela").unwrap() > fuzzy("tela", "outela").unwrap(), "começo de palavra soma");
+        assert_eq!(fuzzy("zx", "importacao"), None);
     }
 
     #[test]
