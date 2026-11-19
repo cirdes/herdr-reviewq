@@ -3,7 +3,7 @@ name = "reviewq"
 version = "0.1.0"
 min_herdr_version = "0.9.3"
 platforms = ["macos"]
-description = "Painel de reviews pendentes: worktrees prontos, feitas hoje e ações por PR."
+description = "Ready-to-use worktrees for the PRs awaiting your review, with a herdr panel and per-PR actions."
 
 # `plugin install` baixa da release o binário deste Mac para ~/.local/bin; `plugin link` pula.
 [[build]]
@@ -18,18 +18,18 @@ command = ["bin/herdr-reviewq", "tui"]
 
 [[actions]]
 id = "open"
-title = "reviewq: abrir painel"
+title = "reviewq: open panel"
 contexts = ["pane", "workspace"]
 command = ["bin/herdr-reviewq", "ui", "open"]
 
 [[actions]]
 id = "sync-now"
-title = "reviewq: sincronizar agora"
+title = "reviewq: sync now"
 contexts = ["pane", "workspace"]
 command = ["bin/herdr-reviewq", "request", "sync"]
 
 [[actions]]
 id = "first-ready"
-title = "reviewq: primeiro PR pronto"
+title = "reviewq: first ready PR"
 contexts = ["pane", "workspace"]
 command = ["bin/herdr-reviewq", "focus", "first-ready"]
