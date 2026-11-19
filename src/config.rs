@@ -118,6 +118,14 @@ impl Config {
     }
 
     pub fn load(path: &Path, home: &Path) -> Result<Config> {
+        if !path.exists() {
+            // Quem instalou pelo marketplace cai aqui na primeira vez que abre o painel
+            bail!(
+                "falta o config: copie {} para {}, edite os [[repos]] e rode `herdr-reviewq service install`",
+                path.with_file_name("config.example.toml").display(),
+                path.display()
+            );
+        }
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("não consegui ler {}", path.display()))?;
         Self::parse(&text, home)
@@ -171,6 +179,15 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn missing_config_says_how_to_create_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let err = format!("{:#}", Config::load(&path, dir.path()).unwrap_err());
+        assert!(err.contains("config.example.toml"), "{err}");
+        assert!(err.contains("service install"), "{err}");
+    }
+
     use super::*;
     use std::path::Path;
 

@@ -5,6 +5,11 @@ min_herdr_version = "0.9.3"
 platforms = ["macos"]
 description = "Painel de reviews pendentes: worktrees prontos, feitas hoje e ações por PR."
 
+# `plugin install` baixa da release o binário deste Mac para ~/.local/bin; `plugin link` pula.
+[[build]]
+platforms = ["macos"]
+command = ["bash", "herdr/install.sh"]
+
 [[panes]]
 id = "tui"
 title = "reviewq"
