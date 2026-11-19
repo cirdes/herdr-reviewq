@@ -1,0 +1,65 @@
+name: release
+
+# Numa tag v*, compila o binário de cada Mac e anexa à release, de onde o herdr/install.sh baixa.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  # Proveniência assinada de cada asset: `gh attestation verify <asset> --repo cirdes/herdr-reviewq`.
+  id-token: write
+  attestations: write
+
+jobs:
+  # O install.sh baixa a release da versão do manifesto: uma tag que não bate nunca seria usada.
+  # A release nasce como rascunho, porque uma release imutável recusa assets depois de publicada.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag igual à versão do manifesto e do Cargo.toml
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          manifest="$(grep -m1 '^version' herdr-plugin.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          cargo="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          echo "tag=$tag manifesto=$manifest cargo=$cargo"
+          [ "$tag" = "$manifest" ] && [ "$tag" = "$cargo" ]
+      - run: gh release create "$GITHUB_REF_NAME" --draft --generate-notes --title "herdr-reviewq $GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  binaries:
+    needs: create-release
+    name: ${{ matrix.target }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v7
+
+      # Gera herdr-reviewq-<target>.tar.gz com o .sha256 ao lado: os nomes que o install.sh baixa.
+      - uses: taiki-e/upload-rust-binary-action@v1
+        id: upload
+        with:
+          bin: herdr-reviewq
+          target: ${{ matrix.target }}
+          archive: $bin-$target
+          tar: unix
+          checksum: sha256
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: ${{ steps.upload.outputs.tar }}
+
+  # Publica só com todos os assets anexados: um alvo que falhou deixa um rascunho, nunca um 404.
+  publish:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

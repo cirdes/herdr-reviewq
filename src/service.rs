@@ -176,6 +176,11 @@ mod tests {
         assert_eq!(ids, vec!["open", "sync-now", "first-ready"]);
         let wrapper = include_str!("../bin/herdr-reviewq");
         assert!(wrapper.contains("exec \"$HOME/.local/bin/herdr-reviewq\" \"$@\""));
+        // `plugin install` baixa o binário para o mesmo caminho que o wrapper executa
+        assert_eq!(m["build"][0]["command"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect::<Vec<_>>(), vec!["bash", "herdr/install.sh"]);
+        let install = include_str!("../herdr/install.sh");
+        assert!(install.contains("dest_dir=\"$HOME/.local/bin\""));
+        assert!(install.contains(&format!("LABEL=\"{LABEL}\"")));
     }
 
     #[test]

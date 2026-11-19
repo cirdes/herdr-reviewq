@@ -26,17 +26,22 @@ A herdr plugin adds a panel that shows your pending reviews, the state of each w
 - macOS (the daemon runs as a launchd LaunchAgent)
 - [herdr](https://herdr.dev) 0.9.3 or newer, or the Herdr desktop app (see [Herdr desktop app](#herdr-desktop-app))
 - The [GitHub CLI](https://cli.github.com), authenticated: `gh auth login`, then `gh auth setup-git`
-- Rust and cargo, to build the binary
+- Rust and cargo, only to build from source
 - A local clone of every repo you review
 - Whatever your setup commands need, for example [mise](https://mise.jdx.dev)
 
 ## Install
 
-1. Create the config:
+1. Install the plugin. The install downloads the binary for your Mac from the GitHub release and puts it at `~/.local/bin/herdr-reviewq`:
 
    ```sh
-   mkdir -p ~/.config/herdr-reviewq
-   cp config.example.toml ~/.config/herdr-reviewq/config.toml
+   herdr plugin install cirdes/herdr-reviewq
+   ```
+
+2. Create the config. The install leaves the example next to where the config goes:
+
+   ```sh
+   cp ~/.config/herdr-reviewq/config.example.toml ~/.config/herdr-reviewq/config.toml
    ```
 
    In `[[repos]]`, set each repo's `name` (`owner/repo`), the `path` to your local clone and its `setup` commands.
@@ -45,24 +50,41 @@ A herdr plugin adds a panel that shows your pending reviews, the state of each w
 
    Unknown config keys are an error.
 
-2. Build and install the daemon:
+3. Start the daemon. This registers and starts the LaunchAgent:
 
    ```sh
-   cargo build --release
-   ./target/release/herdr-reviewq service install
+   ~/.local/bin/herdr-reviewq service install
    ```
 
-   This copies the binary to `~/.local/bin/herdr-reviewq` and registers and starts the LaunchAgent.
+To update, reinstall the plugin. With the daemon installed, the install restarts it on the new binary:
 
-3. Link the herdr plugin. You only need to do this once, and it takes effect immediately, with no reload:
+```sh
+herdr plugin uninstall cirdes.reviewq && herdr plugin install cirdes/herdr-reviewq
+```
 
-   ```sh
-   herdr plugin link /path/to/herdr-reviewq
-   ```
+A panel that is already open keeps running the old binary until you close its pane and open the panel again.
 
-   The link points at your working tree. If you check out a branch that lacks `herdr-plugin.toml` or `bin/herdr-reviewq`, the panel and actions break. Run `herdr plugin link` again after switching back.
+### From source
 
-To update, pull and repeat step 2. A panel that is already open keeps running the old binary until you close its pane and open the panel again.
+To run your own build, create the config as in step 2 (copy `config.example.toml` from the clone), then:
+
+```sh
+cargo build --release
+./target/release/herdr-reviewq service install
+herdr plugin link /path/to/herdr-reviewq
+```
+
+`service install` copies the binary to `~/.local/bin/herdr-reviewq`, which the plugin runs. `plugin link` skips the download and points at your working tree. If you check out a branch that lacks `herdr-plugin.toml` or `bin/herdr-reviewq`, the panel and actions break; run `herdr plugin link` again after switching back. To update, pull, build and run `service install` again.
+
+### Releasing
+
+Bump `version` in `Cargo.toml` and `herdr-plugin.toml` (a test keeps them equal), merge, then push a tag with that version:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+The release workflow builds both Mac binaries, attaches them with their checksums and publishes the release once both are up. The install downloads the release whose tag matches the manifest version, so a version bump without a tag breaks installs.
 
 ## The panel
 
