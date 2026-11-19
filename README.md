@@ -115,7 +115,8 @@ On your own PRs (**Meus PRs**) only `enter` and `o` do something; `l`, `R`, `a` 
 `/` filters the list as you type. Only matching rows stay, still grouped in their sections, and the footer shows how many match (`/eng-4321▏ (2 de 23)`).
 
 - **What it looks at:** the PR number (`123` or `#123`), repo, author, title and branch. The branch is where a Linear issue usually lives (`alice-eng-4321-fix`), so `eng-4321` finds the PR even if the title doesn't mention it. For **Meus PRs** the branch comes from the open PRs reviewq collects for stacks, so it is unknown until the first collection.
-- **How it matches:** substring, ignoring case and accents (`importacao` matches `Importação`). Several words must all match: `alice tela`.
+- **How it matches:** fuzzy, ignoring case and accents. A word matches a field when its letters appear there in order, gaps allowed, so `crgimp` finds "Corrige importação" and `eng4321` finds `alice-eng-4321-fix`. The letters must all come from the same field: `101alice` doesn't join the number and the author. Several words must all match: `alice tela`.
+- **Order:** inside each section, the best matches come first. An exact piece of text beats scattered letters, and matches at the start of a word or with letters next to each other score more. Ties keep the usual order. A row waiting for `y`/`n` stays at the top of its section even if it doesn't match.
 - **While typing,** every letter goes into the search (`q`, `s`, `a`... don't trigger actions). `↑` `↓` move the selection, `backspace` deletes, `ctrl+u` clears the text, `enter` keeps the filter and gives the keys back, `esc` clears it. Other `ctrl`/`alt` combinations are ignored. A result that arrives while you type (a sync, say) shows on the top line.
 - **With the filter kept,** the top line shows `busca "<text>": n de m`. The filter survives list refreshes; `/` edits it and `esc` clears it. The counters (Pendentes, Feitas hoje, Abertos 24h) ignore the filter.
 
