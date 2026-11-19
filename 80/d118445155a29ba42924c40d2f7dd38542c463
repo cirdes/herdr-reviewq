@@ -1,0 +1,19 @@
+herdr-plugin.toml
+  s_fe7eb947b726bb::t_1e100e7540c3bf 6,21,27,33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.5",
+  "base_commit_sha": "80d118445155a29ba42924c40d2f7dd38542c463",
+  "prompts": {},
+  "sessions": {
+    "s_fe7eb947b726bb": {
+      "agent_id": {
+        "tool": "claude",
+        "id": "8d1e4a61-36e3-4c8c-a301-3507c672d3fd",
+        "model": "claude-opus-5-5"
+      },
+      "human_author": "Cirdes <cirdes@linkana.com>"
+    }
+  }
+}
