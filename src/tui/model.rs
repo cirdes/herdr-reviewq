@@ -84,6 +84,8 @@ pub struct Row {
     pub stack: String,
     pub url: String,
     pub eligible: Eligibility,
+    /// Texto normalizado (`fold`) onde a busca procura: rótulo, `#n`, repo, autor, título e branch.
+    pub search: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -104,6 +106,8 @@ pub struct View {
     pub alerts: Vec<String>,
     pub request_line: Option<String>,
     pub empty_reason: Option<String>,
+    /// Com filtro ativo: (linhas que casam, total de linhas sem filtro).
+    pub filtered: Option<(usize, usize)>,
 }
 
 #[derive(Debug, Clone)]
@@ -125,6 +129,10 @@ pub struct UiState {
     /// Resultados e avisos; independente de `confirm`.
     pub message: Option<String>,
     pub scroll: usize,
+    /// Texto da busca (`/`); vazio é sem filtro. Sobrevive às releituras do estado até `esc`.
+    pub filter: String,
+    /// Digitando a busca: as teclas vão para `filter` em vez de virar ações.
+    pub typing: bool,
 }
 
 impl UiState {
@@ -173,6 +181,13 @@ impl View {
             };
         };
         let stacks = crate::stacks::labels(state);
+        // Meus PRs não guardam a branch; ela vem dos PRs abertos que o daemon coleta para as pilhas.
+        let open_branches: std::collections::HashMap<PrKey, String> = state
+            .open_prs
+            .repos
+            .iter()
+            .flat_map(|(repo, o)| o.prs.iter().map(move |p| (PrKey::new(repo, p.number), p.head_ref.clone())))
+            .collect();
         // (seção, fase, desempate, linha): Iniciados pelo início mais recente, Meus PRs pela criação
         // mais recente, as demais pela ordem de chegada
         let mut rows: Vec<(Section, u8, i64, Row)> = state
@@ -191,10 +206,22 @@ impl View {
         for repo in &cfg.repos {
             for p in state.my_prs.repos.get(repo).map(|m| m.prs.as_slice()).unwrap_or_default() {
                 let stack = stacks.get(&PrKey::new(repo, p.number)).cloned().unwrap_or_default();
-                rows.push((Section::Mine, 0, -p.created_at.timestamp(), mine_row(repo, p, stack, cfg, now)));
+                let branch = open_branches.get(&PrKey::new(repo, p.number)).map(String::as_str).unwrap_or_default();
+                rows.push((Section::Mine, 0, -p.created_at.timestamp(), mine_row(repo, p, stack, branch, cfg, now)));
             }
         }
         rows.sort_by(|a, b| (a.0, a.1, a.2, &a.3.id).cmp(&(b.0, b.1, b.2, &b.3.id)));
+        let total = rows.len();
+        let terms = terms(&ui.filter);
+        // A linha em confirmação (y/n) fica mesmo sem casar: uma releitura que mude o título não
+        // pode cancelar o pedido como se o PR tivesse mudado de estado.
+        let confirming = ui.confirm.as_ref().map(|(_, k)| RowId::Review(k.clone()));
+        rows.retain(|t| matches(&t.3.search, &terms) || confirming.as_ref() == Some(&t.3.id));
+        let filtered = (!terms.is_empty()).then_some((rows.len(), total));
+        let empty_reason = match filtered {
+            Some((0, _)) => Some(format!("nenhum PR casa com \"{}\" (esc limpa a busca)", ui.filter.trim())),
+            _ => None,
+        };
 
         let pending_n = state.prs.values().filter(|r| r.remote == Remote::Pending).count();
         let any_unsynced = cfg.repos.iter().any(|name| !state.repos.get(name).is_some_and(|s| s.ok));
@@ -208,7 +235,8 @@ impl View {
             header: header(state, cfg, now),
             alerts: state.alerts.iter().rev().take(3).map(|a| format!("{}  {}", local_hm(a.at), a.message)).collect(),
             request_line: request_line(state, ui, now),
-            empty_reason: None,
+            empty_reason,
+            filtered,
         }
     }
 }
@@ -229,9 +257,10 @@ fn label(key: &PrKey, cfg: &ViewConfig) -> String {
     if cfg.repos.len() > 1 { key.to_string() } else { format!("#{}", key.number) }
 }
 
-fn mine_row(repo: &str, p: &crate::state::MyPr, stack: String, cfg: &ViewConfig, now: DateTime<Utc>) -> Row {
+fn mine_row(repo: &str, p: &crate::state::MyPr, stack: String, branch: &str, cfg: &ViewConfig, now: DateTime<Utc>) -> Row {
     let key = PrKey::new(repo, p.number);
     Row {
+        search: haystack(&key, "você", &p.title, branch),
         label: label(&key, cfg),
         id: RowId::Mine(key),
         section: Section::Mine,
@@ -245,6 +274,36 @@ fn mine_row(repo: &str, p: &crate::state::MyPr, stack: String, cfg: &ViewConfig,
         url: p.url.clone(),
         eligible: Eligibility::default(),
     }
+}
+
+/// Minúsculas e sem acento, para a busca não depender de como o texto foi digitado.
+pub fn fold(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ã' | 'ä' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'õ' | 'ö' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            'ñ' => 'n',
+            c => c,
+        })
+        .collect()
+}
+
+fn haystack(key: &PrKey, author: &str, title: &str, branch: &str) -> String {
+    fold(&format!("{key} #{} {author} {title} {branch}", key.number))
+}
+
+/// Termos da busca separados por espaço; todos precisam casar.
+fn terms(filter: &str) -> Vec<String> {
+    fold(filter).split_whitespace().map(str::to_string).collect()
+}
+
+fn matches(search: &str, terms: &[String]) -> bool {
+    terms.iter().all(|t| search.contains(t.as_str()))
 }
 
 fn phase_rank(p: &Phase) -> u8 {
@@ -298,6 +357,7 @@ fn row_of(r: &PrRecord, section: Section, stack: String, state: &State, cfg: &Vi
     };
     let missing = facts.missing_worktrees.contains(&r.key);
     Row {
+        search: haystack(&r.key, &r.author, &r.title, &r.head_ref),
         id: RowId::Review(r.key.clone()),
         label: label(&r.key, cfg),
         section,
@@ -805,5 +865,82 @@ mod tests {
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
         assert_eq!(v.row(&rid(1)).unwrap().ci, "?");
         assert_eq!(v.row(&rid(2)).unwrap().ci, "✗ rspec");
+    }
+
+    fn search_state(now: DateTime<Utc>) -> State {
+        let mut a = PrRecord::fixture("o/r", 101, "alice-eng-4321-fix", "s");
+        a.title = "Corrige importação".into();
+        a.author = "alice".into();
+        let mut b = PrRecord::fixture("o/r", 102, "feat/outra", "s");
+        b.title = "Nova tela".into();
+        let mut s = state_with(vec![a, b], now);
+        with_mine(&mut s, vec![mine(9, false, "2026-01-01T00:00:00Z")], now, 1);
+        s.open_prs.repos.insert(
+            "o/r".into(),
+            crate::state::OpenPrsRepo {
+                prs: vec![crate::state::OpenPr { number: 9, head_ref: "dev/eng-7000-busca".into(), base_ref: "main".into() }],
+                default_branch: Some("main".into()),
+                as_of: now,
+            },
+        );
+        s
+    }
+
+    fn ids_for(filter: &str) -> (Vec<RowId>, Option<(usize, usize)>) {
+        let now = Utc::now();
+        let s = search_state(now);
+        let v = build(Some(&s), &UiState { filter: filter.into(), ..Default::default() }, &cfg(), now);
+        (v.order(), v.filtered)
+    }
+
+    #[test]
+    fn filter_matches_number_branch_title_author() {
+        assert_eq!(ids_for("").0.len(), 3);
+        assert_eq!(ids_for("").1, None);
+        assert_eq!(ids_for("#101"), (vec![rid(101)], Some((1, 3))));
+        assert_eq!(ids_for("ENG-4321").0, vec![rid(101)], "branch, sem diferenciar maiúscula");
+        assert_eq!(ids_for("4321").0, vec![rid(101)]);
+        assert_eq!(ids_for("importacao").0, vec![rid(101)], "sem acento casa com acento");
+        assert_eq!(ids_for("TELA").0, vec![rid(102)]);
+        assert_eq!(ids_for("alice").0, vec![rid(101)]);
+    }
+
+    #[test]
+    fn filter_terms_are_and() {
+        assert_eq!(ids_for("alice corrige").0, vec![rid(101)]);
+        assert_eq!(ids_for("alice tela").0, Vec::<RowId>::new());
+    }
+
+    #[test]
+    fn filter_finds_my_pr_by_branch_from_open_prs() {
+        assert_eq!(ids_for("eng-7000").0, vec![mid(9)]);
+        assert_eq!(ids_for("você").0, vec![mid(9)]);
+    }
+
+    #[test]
+    fn filter_without_match_explains_empty_list() {
+        let now = Utc::now();
+        let s = search_state(now);
+        let v = build(Some(&s), &UiState { filter: "zzz".into(), ..Default::default() }, &cfg(), now);
+        assert!(v.rows.is_empty());
+        assert_eq!(v.filtered, Some((0, 3)));
+        assert!(v.empty_reason.as_deref().unwrap().contains("zzz"));
+    }
+
+    #[test]
+    fn filter_keeps_row_under_confirmation() {
+        let now = Utc::now();
+        let s = search_state(now);
+        let ui = UiState { filter: "tela".into(), confirm: Some((RequestKind::Adopt, PrKey::new("o/r", 101))), ..Default::default() };
+        let v = build(Some(&s), &ui, &cfg(), now);
+        assert_eq!(v.order(), vec![rid(101), rid(102)]);
+    }
+
+    #[test]
+    fn filter_does_not_change_counters() {
+        let now = Utc::now();
+        let s = search_state(now);
+        let v = build(Some(&s), &UiState { filter: "#101".into(), ..Default::default() }, &cfg(), now);
+        assert_eq!(v.pending, "2");
     }
 }

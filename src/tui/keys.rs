@@ -8,7 +8,10 @@ pub enum Key {
     Down,
     Enter,
     Esc,
+    Backspace,
     CtrlC,
+    /// Limpa a busca enquanto digita (hábito de terminal); fora da busca não faz nada.
+    CtrlU,
     Char(char),
 }
 
@@ -50,6 +53,14 @@ pub fn confirm_text(kind: RequestKind, key: &PrKey) -> String {
     }
 }
 
+fn move_selection(mut next: UiState, key: Key, index: Option<usize>, view: &View) -> UiState {
+    if let Some(i) = index {
+        let j = if key == Key::Up { i.saturating_sub(1) } else { (i + 1).min(view.rows.len() - 1) };
+        next.selected = Some(view.rows[j].id.clone());
+    }
+    next
+}
+
 pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) {
     let mut next = ui.clone();
 
@@ -75,20 +86,45 @@ pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) 
         };
     }
 
-    next.message = None;
     let selected = ui.selected_row(view);
     let index = selected.and_then(|r| view.rows.iter().position(|x| x.id == r.id));
-    match key {
-        Key::Up | Key::Char('k') => {
-            if let Some(i) = index {
-                next.selected = Some(view.rows[i.saturating_sub(1)].id.clone());
+
+    // Digitando a busca: toda letra vai para o filtro (inclusive `q`, `s`, `a`...); só setas, enter,
+    // esc, backspace, ctrl+u e ctrl+c mantêm o sentido. A mensagem do worker não é apagada aqui:
+    // o rodapé mostra o prompt, então ela fica no topo até a busca terminar.
+    if ui.typing {
+        match key {
+            Key::Char(c) => next.filter.push(c),
+            Key::Backspace => {
+                next.filter.pop();
             }
+            Key::CtrlU => next.filter.clear(),
+            Key::Enter => {
+                next.typing = false;
+                // filtro só com espaços não filtra nada; não pode deixar um `esc` "preso" nele
+                next.filter = next.filter.trim().to_string();
+            }
+            Key::Esc => {
+                next.typing = false;
+                next.filter.clear();
+            }
+            Key::CtrlC => return (next, Some(Action::Quit)),
+            Key::Up | Key::Down => return (move_selection(next, key, index, view), None),
+        }
+        return (next, None);
+    }
+
+    next.message = None;
+    match key {
+        Key::Up | Key::Char('k') => (move_selection(next, Key::Up, index, view), None),
+        Key::Down | Key::Char('j') => (move_selection(next, Key::Down, index, view), None),
+        Key::Char('/') => {
+            next.typing = true;
             (next, None)
         }
-        Key::Down | Key::Char('j') => {
-            if let Some(i) = index {
-                next.selected = Some(view.rows[(i + 1).min(view.rows.len() - 1)].id.clone());
-            }
+        // com busca ativa, `esc` limpa a busca em vez de sair
+        Key::Esc if !ui.filter.trim().is_empty() => {
+            next.filter.clear();
             (next, None)
         }
         Key::Char('q') | Key::Esc | Key::CtrlC => (next, Some(Action::Quit)),
@@ -307,5 +343,111 @@ mod tests {
         let (ui, _) = handle(Key::Char('a'), &UiState::default(), &v);
         assert!(ui.confirm.is_some() && ui.message.is_none());
         assert!(confirm_text(RequestKind::Adopt, &PrKey::new("o/r", 1)).contains("(y/n)"));
+    }
+
+    fn type_str(mut ui: UiState, v: &View, s: &str) -> UiState {
+        for c in s.chars() {
+            let (next, a) = handle(Key::Char(c), &ui, v);
+            assert!(a.is_none(), "{c} virou ação durante a busca");
+            ui = next;
+        }
+        ui
+    }
+
+    #[test]
+    fn slash_starts_search_and_letters_do_not_trigger_actions() {
+        let v = view(vec![adopted(5)]);
+        let (ui, a) = handle(Key::Char('/'), &UiState::default(), &v);
+        assert!(a.is_none() && ui.typing);
+        // q, s, a, r seriam sair, sync, adotar e liberar fora da busca
+        let ui = type_str(ui, &v, "qsar");
+        assert_eq!(ui.filter, "qsar");
+        assert!(ui.confirm.is_none() && ui.typing);
+    }
+
+    #[test]
+    fn backspace_enter_and_esc_while_typing() {
+        let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s")]);
+        let ui = type_str(UiState { typing: true, ..Default::default() }, &v, "eng-1");
+        let (ui, _) = handle(Key::Backspace, &ui, &v);
+        assert_eq!(ui.filter, "eng-");
+        let (kept, a) = handle(Key::Enter, &ui, &v);
+        assert!(a.is_none() && !kept.typing && kept.filter == "eng-", "enter mantém o filtro");
+        let (cleared, a) = handle(Key::Esc, &ui, &v);
+        assert!(a.is_none() && !cleared.typing && cleared.filter.is_empty(), "esc na digitação limpa");
+        assert_eq!(handle(Key::CtrlC, &ui, &v).1, Some(Action::Quit));
+    }
+
+    #[test]
+    fn arrows_move_while_typing() {
+        let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s"), PrRecord::fixture("o/r", 2, "x", "s")]);
+        let (ui, a) = handle(Key::Down, &UiState { typing: true, ..Default::default() }, &v);
+        assert!(a.is_none() && ui.typing);
+        assert_eq!(ui.selected, Some(RowId::Review(PrKey::new("o/r", 2))));
+    }
+
+    #[test]
+    fn confirmation_survives_refresh_that_unmatches_the_filter() {
+        // `a` com a busca "PR 5"; o título muda numa releitura e o PR deixa de casar antes do `y`
+        let ui = UiState { filter: "PR 5".into(), selected: Some(RowId::Review(PrKey::new("o/r", 5))), ..Default::default() };
+        let (ui, _) = handle(Key::Char('a'), &ui, &view(vec![PrRecord::fixture("o/r", 5, "x", "s")]));
+        assert!(ui.confirm.is_some());
+        let mut renamed = PrRecord::fixture("o/r", 5, "x", "s");
+        renamed.title = "outro título".into();
+        let mut s = State::default();
+        s.repos.insert("o/r".into(), RepoStatus { ok: true, last_sync: Some(Utc::now()), ..Default::default() });
+        s.insert(renamed);
+        let cfg = ViewConfig { repos: vec!["o/r".into()], poll_interval_secs: 60, remove_grace: chrono::Duration::minutes(15) };
+        let v = View::build(Some(&s), &ui, &cfg, &UiFacts::default(), Utc::now());
+        let (_, a) = handle(Key::Char('y'), &ui, &v);
+        assert_eq!(a, Some(Action::Request(RequestKind::Adopt, Some(PrKey::new("o/r", 5)))));
+    }
+
+    #[test]
+    fn esc_with_active_filter_clears_instead_of_quitting() {
+        let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s")]);
+        let ui = UiState { filter: "x".into(), ..Default::default() };
+        let (ui, a) = handle(Key::Esc, &ui, &v);
+        assert!(a.is_none() && ui.filter.is_empty());
+        assert_eq!(handle(Key::Esc, &ui, &v).1, Some(Action::Quit));
+        // com filtro mantido, as ações voltam a valer e `/` reabre a edição sem perder o texto
+        let ui = UiState { filter: "x".into(), ..Default::default() };
+        assert!(matches!(handle(Key::Enter, &ui, &v).1, Some(Action::Focus(_))));
+        let (ui, _) = handle(Key::Char('/'), &ui, &v);
+        assert!(ui.typing && ui.filter == "x");
+    }
+
+    #[test]
+    fn worker_message_survives_typing() {
+        let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s")]);
+        let ui = UiState { typing: true, message: Some("sync falhou".into()), ..Default::default() };
+        let ui = type_str(ui, &v, "ab");
+        assert_eq!(ui.message.as_deref(), Some("sync falhou"));
+        let (ui, _) = handle(Key::Enter, &ui, &v);
+        assert_eq!(ui.message.as_deref(), Some("sync falhou"), "aparece no rodapé ao sair da digitação");
+        let (ui, _) = handle(Key::Down, &ui, &v);
+        assert!(ui.message.is_none(), "fora da busca a próxima tecla apaga, como antes");
+    }
+
+    #[test]
+    fn ctrl_u_clears_search_and_is_ignored_outside() {
+        let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s")]);
+        let ui = type_str(UiState { typing: true, ..Default::default() }, &v, "abc");
+        let (ui, a) = handle(Key::CtrlU, &ui, &v);
+        assert!(a.is_none() && ui.filter.is_empty() && ui.typing);
+        let (ui, a) = handle(Key::CtrlU, &UiState::default(), &v);
+        assert!(a.is_none() && ui.confirm.is_none());
+    }
+
+    #[test]
+    fn blank_filter_does_not_hold_esc() {
+        let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s")]);
+        let ui = type_str(UiState { typing: true, ..Default::default() }, &v, "  ");
+        let (ui, _) = handle(Key::Enter, &ui, &v);
+        assert!(ui.filter.is_empty());
+        assert_eq!(handle(Key::Esc, &ui, &v).1, Some(Action::Quit));
+        // mesmo um filtro em branco vindo de outro caminho não segura o `esc`
+        let ui = UiState { filter: "  ".into(), ..Default::default() };
+        assert_eq!(handle(Key::Esc, &ui, &v).1, Some(Action::Quit));
     }
 }

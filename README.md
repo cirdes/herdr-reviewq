@@ -98,6 +98,7 @@ Quitting the panel (`q`) closes its pane, because the pane ends with its command
 | Key | Action |
 |---|---|
 | `↑` `↓` / `k` `j` | Move the selection |
+| `/` | Search: filter the list as you type (see [Search](#search)) |
 | `enter` | Open the PR's workspace (recreated if it was closed). On your own PRs, open the PR in the browser |
 | `o` | Open the PR in the browser on the daemon's machine, and copy the URL through OSC 52 (handy over a remote session) |
 | `l` | Open the PR's setup log |
@@ -105,9 +106,18 @@ Quitting the panel (`q`) closes its pane, because the pane ends with its command
 | `R` | Retry (managed PRs only, when setup failed or the worktree is missing) |
 | `a` | Adopt the worktree (asks for `y`/`n`) |
 | `r` | Release an adopted worktree (asks for `y`/`n`) |
-| `q` / `esc` / `ctrl+c` | Quit |
+| `q` / `esc` / `ctrl+c` | Quit. With a search active, `esc` clears it instead |
 
 On your own PRs (**Meus PRs**) only `enter` and `o` do something; `l`, `R`, `a` and `r` apply to review worktrees.
+
+### Search
+
+`/` filters the list as you type. Only matching rows stay, still grouped in their sections, and the footer shows how many match (`/eng-4321▏ (2 de 23)`).
+
+- **What it looks at:** the PR number (`123` or `#123`), repo, author, title and branch. The branch is where a Linear issue usually lives (`alice-eng-4321-fix`), so `eng-4321` finds the PR even if the title doesn't mention it. For **Meus PRs** the branch comes from the open PRs reviewq collects for stacks, so it is unknown until the first collection.
+- **How it matches:** substring, ignoring case and accents (`importacao` matches `Importação`). Several words must all match: `alice tela`.
+- **While typing,** every letter goes into the search (`q`, `s`, `a`... don't trigger actions). `↑` `↓` move the selection, `backspace` deletes, `ctrl+u` clears the text, `enter` keeps the filter and gives the keys back, `esc` clears it. Other `ctrl`/`alt` combinations are ignored. A result that arrives while you type (a sync, say) shows on the top line.
+- **With the filter kept,** the top line shows `busca "<text>": n de m`. The filter survives list refreshes; `/` edits it and `esc` clears it. The counters (Pendentes, Feitas hoje, Abertos 24h) ignore the filter.
 
 ## Command line
 
