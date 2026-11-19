@@ -10,7 +10,7 @@ use unicode_width::UnicodeWidthStr;
 
 pub const MIN_W: u16 = 60;
 pub const MIN_H: u16 = 12;
-const FOOTER: &str = "↑↓ mover · enter abrir · o GitHub · l log · s sync · R tentar de novo · a adotar · r liberar · q sair";
+const FOOTER: &str = "↑↓ mover · / buscar · enter abrir · o GitHub · l log · s sync · R tentar de novo · a adotar · r liberar · q sair";
 const MAX_CONFIRM_LINES: u16 = 4;
 const BOTTOM_H: u16 = 5;
 
@@ -73,10 +73,20 @@ pub fn draw(f: &mut Frame, view: &View, ui: &UiState) {
     .areas(area);
 
     let sync_style = if view.header.stale || !view.header.errors.is_empty() { Style::new().fg(Color::Red) } else { Style::new() };
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::raw(" reviewq   "), Span::styled(view.header.sync.clone(), sync_style)])),
-        head,
-    );
+    let mut head_spans = vec![Span::raw(" reviewq   "), Span::styled(view.header.sync.clone(), sync_style)];
+    let head_used = cells(" reviewq   ") + cells(&view.header.sync);
+    if ui.typing {
+        // o rodapé está com o prompt: resultado do worker que chegar durante a busca aparece aqui
+        if let Some(m) = &ui.message {
+            let room = (head.width as usize).saturating_sub(head_used + 3);
+            head_spans.push(Span::styled(format!("   {}", fit(m, room).trim_end()), Style::new().fg(Color::Yellow)));
+        }
+    } else if let Some((shown, total)) = view.filtered {
+        let suffix = format!("\": {shown} de {total} · esc limpa · / edita");
+        let room = (head.width as usize).saturating_sub(head_used + cells("   busca \"") + cells(&suffix));
+        head_spans.push(Span::styled(format!("   busca \"{}{suffix}", tail_fit(ui.filter.trim(), room)), Style::new().fg(Color::Cyan)));
+    }
+    f.render_widget(Paragraph::new(Line::from(head_spans)), head);
 
     let [c1, c2, c3, c4] =
         Layout::horizontal([Constraint::Length(14), Constraint::Length(16), Constraint::Length(16), Constraint::Min(0)]).areas(counters);
@@ -95,6 +105,13 @@ pub fn draw(f: &mut Frame, view: &View, ui: &UiState) {
                 .style(Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
             footer,
         ),
+        None if ui.typing => {
+            let count = view.filtered.map(|(shown, total)| format!("  ({shown} de {total})")).unwrap_or_default();
+            let hint = "  · enter mantém · esc limpa";
+            let room = (footer.width as usize).saturating_sub(3 + cells(&count) + cells(hint));
+            let text = format!(" /{}▏{count}{hint}", tail_fit(&ui.filter, room));
+            f.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD))), footer);
+        }
         None => {
             let text = ui.message.clone().unwrap_or_else(|| FOOTER.to_string());
             f.render_widget(Paragraph::new(Span::styled(format!(" {text}"), Style::new().fg(Color::DarkGray))), footer);
@@ -134,6 +151,25 @@ fn draw_bottom(f: &mut Frame, area: Rect, view: &View) {
 /// coisa.
 fn cells(s: &str) -> usize {
     s.graphemes(true).map(UnicodeWidthStr::width).sum()
+}
+
+/// `s` em até `room` células (mínimo 8), cortando pelo começo com `…`: na busca longa o que importa
+/// é o fim, onde está o cursor.
+fn tail_fit(s: &str, room: usize) -> String {
+    let room = room.max(8);
+    if cells(s) <= room {
+        return s.to_string();
+    }
+    let mut tail: Vec<&str> = vec![];
+    let mut used = 1;
+    for g in s.graphemes(true).rev() {
+        if used + g.width() > room {
+            break;
+        }
+        used += g.width();
+        tail.push(g);
+    }
+    format!("…{}", tail.into_iter().rev().collect::<String>())
 }
 
 /// `s` em exatamente `w` células do terminal: corta pelo que cabe e completa com espaço. Conta a
@@ -687,5 +723,51 @@ mod tests {
         std::fs::create_dir_all("assets").unwrap();
         std::fs::write("assets/tui.svg", out).unwrap();
         println!("{}", screen(w, h, &view, &ui));
+    }
+
+    #[test]
+    fn search_prompt_and_active_filter() {
+        let mut s = base_state();
+        s.insert(PrRecord::fixture("o/r", 1, "eng-4321", "s"));
+        s.insert(PrRecord::fixture("o/r", 2, "outra", "s"));
+        let typing = UiState { filter: "4321".into(), typing: true, ..Default::default() };
+        let out = screen(110, 24, &build(&s, &typing), &typing);
+        assert!(out.contains("/4321▏  (1 de 2)"), "{out}");
+        assert!(!out.contains("#2 "), "linha filtrada aparece:\n{out}");
+        let kept = UiState { typing: false, ..typing };
+        let out = screen(110, 24, &build(&s, &kept), &kept);
+        assert!(out.contains("busca \"4321\": 1 de 2"), "{out}");
+        assert!(out.contains("/ buscar"), "rodapé normal volta:\n{out}");
+    }
+
+    #[test]
+    fn long_search_keeps_cursor_and_count_visible() {
+        let mut s = base_state();
+        s.insert(PrRecord::fixture("o/r", 1, "x", "s"));
+        let filter = format!("{}fim", "a".repeat(120));
+        let ui = UiState { filter, typing: true, ..Default::default() };
+        let out = screen(80, 24, &build(&s, &ui), &ui);
+        let last = out.lines().last().unwrap();
+        assert!(last.contains("…") && last.contains("fim▏") && last.contains("(0 de 1)") && last.contains("esc limpa"), "{out}");
+    }
+
+    #[test]
+    fn worker_message_shows_on_top_while_typing() {
+        let mut s = base_state();
+        s.insert(PrRecord::fixture("o/r", 1, "x", "s"));
+        let ui = UiState { filter: "x".into(), typing: true, message: Some("sync falhou".into()), ..Default::default() };
+        let out = screen(110, 24, &build(&s, &ui), &ui);
+        assert!(out.lines().next().unwrap().contains("sync falhou"), "{out}");
+        assert!(out.lines().last().unwrap().contains("/x▏"), "{out}");
+    }
+
+    #[test]
+    fn long_kept_filter_is_cut_on_top_line() {
+        let mut s = base_state();
+        s.insert(PrRecord::fixture("o/r", 1, "x", "s"));
+        let ui = UiState { filter: format!("{}fim", "a".repeat(120)), ..Default::default() };
+        let out = screen(80, 24, &build(&s, &ui), &ui);
+        let top = out.lines().next().unwrap();
+        assert!(top.contains("…") && top.contains("fim\": 0 de 1") && top.contains("/ edita"), "{out}");
     }
 }

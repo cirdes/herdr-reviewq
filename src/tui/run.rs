@@ -58,7 +58,9 @@ fn key_name(k: &Key) -> String {
         Key::Down => "↓".into(),
         Key::Enter => "Enter".into(),
         Key::Esc => "Esc".into(),
+        Key::Backspace => "Backspace".into(),
         Key::CtrlC => "Ctrl-C".into(),
+        Key::CtrlU => "Ctrl-U".into(),
         Key::Char(c) => c.to_string(),
     }
 }
@@ -86,7 +88,8 @@ pub fn key_from_event(e: &Event) -> Option<Key> {
     // `Event::Paste` (bracketed paste) e qualquer outro evento que não seja tecla são ignorados
     let Event::Key(k) = e else { return None };
     // `Repeat` (com REPORT_EVENT_TYPES) só vale para rolar a lista segurando a tecla; ações nunca repetem
-    let scroll = matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k'))
+    // (backspace também repete: segurar apaga a busca; fora dela não faz nada)
+    let scroll = matches!(k.code, KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k') | KeyCode::Backspace)
         && !k.modifiers.contains(KeyModifiers::CONTROL);
     match k.kind {
         KeyEventKind::Press => {}
@@ -95,11 +98,15 @@ pub fn key_from_event(e: &Event) -> Option<Key> {
     }
     match k.code {
         KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => Some(Key::CtrlC),
+        KeyCode::Char('u') if k.modifiers.contains(KeyModifiers::CONTROL) => Some(Key::CtrlU),
+        // outras combinações com ctrl/alt não viram letra (sujariam a busca)
+        KeyCode::Char(_) if k.modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => None,
         KeyCode::Char(c) => Some(Key::Char(c)),
         KeyCode::Up => Some(Key::Up),
         KeyCode::Down => Some(Key::Down),
         KeyCode::Enter => Some(Key::Enter),
         KeyCode::Esc => Some(Key::Esc),
+        KeyCode::Backspace => Some(Key::Backspace),
         _ => None,
     }
 }
@@ -664,6 +671,13 @@ mod tests {
         assert_eq!(key_from_event(&ev(KeyCode::Char('c'), KeyModifiers::CONTROL, KeyEventKind::Press)), Some(Key::CtrlC));
         assert_eq!(key_from_event(&Event::Paste("y".into())), None);
         assert_eq!(key_from_event(&ev(KeyCode::Up, KeyModifiers::NONE, KeyEventKind::Press)), Some(Key::Up));
+        assert_eq!(key_from_event(&ev(KeyCode::Backspace, KeyModifiers::NONE, KeyEventKind::Press)), Some(Key::Backspace));
+        assert_eq!(key_from_event(&ev(KeyCode::Backspace, KeyModifiers::NONE, KeyEventKind::Repeat)), Some(Key::Backspace));
+        assert_eq!(key_from_event(&ev(KeyCode::Char('u'), KeyModifiers::CONTROL, KeyEventKind::Press)), Some(Key::CtrlU));
+        assert_eq!(key_from_event(&ev(KeyCode::Char('w'), KeyModifiers::CONTROL, KeyEventKind::Press)), None);
+        assert_eq!(key_from_event(&ev(KeyCode::Char('b'), KeyModifiers::ALT, KeyEventKind::Press)), None);
+        // shift continua sendo letra (maiúscula)
+        assert_eq!(key_from_event(&ev(KeyCode::Char('R'), KeyModifiers::SHIFT, KeyEventKind::Press)), Some(Key::Char('R')));
     }
 
     #[test]
