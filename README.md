@@ -76,13 +76,15 @@ herdr plugin link /path/to/herdr-reviewq
 
 ### Releasing
 
-Bump `version` in `Cargo.toml` and `herdr-plugin.toml` (a test keeps them equal), merge, then push a tag with that version:
+Releases are automatic. Every merge to `main` that changes the binary or the plugin (`src/`, `Cargo.*`, `bin/`, `herdr/`, `herdr-app/`, `herdr-plugin.toml`, `config.example.toml`) runs the release workflow, which:
 
-```sh
-git tag v0.2.0 && git push origin v0.2.0
-```
+1. bumps the patch version in `Cargo.toml`, `Cargo.lock` and `herdr-plugin.toml` and commits it to `main` as `chore: release vX.Y.Z`;
+2. tags that commit;
+3. builds both Mac binaries, attaches them with their checksums and publishes the release once both are up.
 
-The release workflow builds both Mac binaries, attaches them with their checksums and publishes the release once both are up. The install downloads the release whose tag matches the manifest version, so a version bump without a tag breaks installs.
+Merges that only touch docs don't release. For a minor or major release, set the new version in `Cargo.toml` and `herdr-plugin.toml` in the PR (a test keeps them equal): when that version has no tag yet, the workflow tags it as is instead of bumping. Pull after a release, since the bump commit lands on `main`.
+
+The install downloads the release whose tag matches the manifest version. Pushing a `v*` tag by hand still publishes that tag, as long as it matches the manifest.
 
 ## The panel
 
