@@ -44,7 +44,7 @@ A herdr plugin adds a panel that shows your pending reviews, the state of each w
 
    In `[[repos]]`, set each repo's `name` (`owner/repo`), the `path` to your local clone and its `setup` commands.
 
-   In `disposable_ignored`, list the ignored paths your setup creates (such as `node_modules` or `vendor/bundle`). These are the only ignored files reviewq may delete along with a worktree.
+   In `disposable_ignored`, list the ignored paths your setup creates (such as `node_modules`, `vendor/bundle`, or `.husky/_` when the install runs husky). These are the only ignored files reviewq may delete along with a worktree.
 
    Unknown config keys are an error.
 
@@ -129,7 +129,7 @@ Quitting the panel (`q`) closes its pane, because the pane ends with its command
 | `R` | Retry (managed PRs only, when setup failed or the worktree is missing) |
 | `a` | Adopt the worktree (asks for `y`/`n`) |
 | `r` | Release an adopted worktree (asks for `y`/`n`) |
-| `X` | Release all adopted worktrees at once (asks for `y`/`n`). Worktrees with uncommitted or unpushed work are kept, and the result line lists them |
+| `X` | Release all adopted worktrees at once (asks for `y`/`n`). Worktrees with uncommitted work, or unpushed work on a PR that is still open, are kept, and the result line lists them |
 | `q` / `esc` / `ctrl+c` | Quit. With a search active, `esc` clears it instead |
 
 On your own PRs (**My PRs**) only `enter` and `o` do something; `l`, `R`, `a` and `r` apply to review worktrees.
@@ -152,7 +152,7 @@ On your own PRs (**My PRs**) only `enter` and `o` do something; `l`, `R`, `a` an
 | `herdr-reviewq request sync` | Check GitHub now |
 | `herdr-reviewq request retry --pr owner/repo#123` | Rerun a failed setup, or recreate a missing worktree (managed worktrees only) |
 | `herdr-reviewq request adopt --pr owner/repo#123` | Mark a worktree as yours before you work in it |
-| `herdr-reviewq request release --pr owner/repo#123` | Hand an adopted worktree back. Only works if it is clean and everything is pushed. |
+| `herdr-reviewq request release --pr owner/repo#123` | Hand an adopted worktree back. Only works if it is clean and everything is pushed. Once the PR is merged or closed, commits that never reached origin don't block it: they stay in `refs/reviewq/backup/pr-<n>/` for 14 days and the result says so. |
 | `herdr-reviewq request release-all` | Hand back every adopted worktree. The ones that are not clean or not pushed are kept and listed in the result. |
 | `herdr-reviewq service restart` | Restart the daemon, for example after editing the config |
 | `herdr-reviewq service uninstall` | Remove the LaunchAgent |
