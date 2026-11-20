@@ -1,8 +1,21 @@
 name: release
 
-# Numa tag v*, compila o binário de cada Mac e anexa à release, de onde o herdr/install.sh baixa.
+# A cada merge que muda o que vai no binário ou no plugin, sobe o patch da versão, commita na main,
+# cria a tag e publica a release com o binário de cada Mac, de onde o herdr/install.sh baixa.
+# Uma tag v* enviada à mão também publica (sem bump).
 on:
   push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "bin/**"
+      - "herdr/**"
+      - "herdr-app/**"
+      - "herdr-plugin.toml"
+      - "config.example.toml"
+      - ".github/workflows/release.yml"
     tags: ["v*"]
 
 permissions:
@@ -11,26 +24,70 @@ permissions:
   id-token: write
   attestations: write
 
+# Dois merges seguidos não podem disputar o mesmo número de versão.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  # Decide a tag. Na main: se a versão atual já tem tag, sobe o patch nos três arquivos, commita e
+  # cria a tag; se o PR já trouxe uma versão nova (minor/major à mão), só cria a tag. O push do
+  # GITHUB_TOKEN não dispara outro workflow, então o commit do bump não entra em loop.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Tag igual à versão do manifesto e do Cargo.toml
+        id: tag
+        run: |
+          read_version() { grep -m1 '^version' "$1" | sed -E 's/.*"([^"]+)".*/\1/'; }
+          manifest="$(read_version herdr-plugin.toml)"
+          cargo="$(read_version Cargo.toml)"
+          echo "manifesto=$manifest cargo=$cargo"
+          [ "$manifest" = "$cargo" ]
+
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then
+            [ "${GITHUB_REF_NAME#v}" = "$manifest" ]
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version="$manifest"
+          if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+            IFS=. read -r major minor patch <<< "$version"
+            version="$major.$minor.$((patch + 1))"
+            # só a primeira linha `version` de cada arquivo (a do pacote)
+            perl -0pi -e "s/^version = \"[^\"]+\"/version = \"$version\"/m" Cargo.toml herdr-plugin.toml
+            perl -0pi -e "s/(name = \"herdr-reviewq\"\nversion = )\"[^\"]+\"/\$1\"$version\"/" Cargo.lock
+            [ "$(read_version Cargo.toml)" = "$version" ] && [ "$(read_version herdr-plugin.toml)" = "$version" ]
+            grep -A1 'name = "herdr-reviewq"' Cargo.lock | grep -q "version = \"$version\""
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -qam "chore: release v$version"
+          fi
+          git tag "v$version"
+          # Atômico: se a main andou nesse meio-tempo, nada é publicado e o próximo merge refaz.
+          git push --atomic origin "HEAD:main" "v$version"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
   # O install.sh baixa a release da versão do manifesto: uma tag que não bate nunca seria usada.
   # A release nasce como rascunho, porque uma release imutável recusa assets depois de publicada.
   create-release:
+    needs: version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - name: Tag igual à versão do manifesto e do Cargo.toml
-        run: |
-          tag="${GITHUB_REF_NAME#v}"
-          manifest="$(grep -m1 '^version' herdr-plugin.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          cargo="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
-          echo "tag=$tag manifesto=$manifest cargo=$cargo"
-          [ "$tag" = "$manifest" ] && [ "$tag" = "$cargo" ]
-      - run: gh release create "$GITHUB_REF_NAME" --draft --generate-notes --title "herdr-reviewq $GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY"
+      - run: gh release create "$TAG" --draft --generate-notes --title "herdr-reviewq $TAG" --repo "$GITHUB_REPOSITORY"
         env:
+          TAG: ${{ needs.version.outputs.tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   binaries:
-    needs: create-release
+    needs: [version, create-release]
     name: ${{ matrix.target }}
     runs-on: macos-latest
     strategy:
@@ -39,6 +96,8 @@ jobs:
         target: [aarch64-apple-darwin, x86_64-apple-darwin]
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.version.outputs.tag }}
 
       # Gera herdr-reviewq-<target>.tar.gz com o .sha256 ao lado: os nomes que o install.sh baixa.
       - uses: taiki-e/upload-rust-binary-action@v1
@@ -49,6 +108,7 @@ jobs:
           archive: $bin-$target
           tar: unix
           checksum: sha256
+          ref: refs/tags/${{ needs.version.outputs.tag }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: actions/attest-build-provenance@v4
@@ -57,9 +117,10 @@ jobs:
 
   # Publica só com todos os assets anexados: um alvo que falhou deixa um rascunho, nunca um 404.
   publish:
-    needs: binaries
+    needs: [version, binaries]
     runs-on: ubuntu-latest
     steps:
-      - run: gh release edit "$GITHUB_REF_NAME" --draft=false --repo "$GITHUB_REPOSITORY"
+      - run: gh release edit "$TAG" --draft=false --repo "$GITHUB_REPOSITORY"
         env:
+          TAG: ${{ needs.version.outputs.tag }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
