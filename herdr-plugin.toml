@@ -1,6 +1,6 @@
 id = "cirdes.reviewq"
 name = "reviewq"
-version = "0.1.1"
+version = "0.1.2"
 min_herdr_version = "0.9.3"
 platforms = ["macos"]
 description = "Ready-to-use worktrees for the PRs awaiting your review, with a herdr panel and per-PR actions."
