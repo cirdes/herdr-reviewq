@@ -123,7 +123,7 @@ pub struct PrRecord {
     pub first_seen_at: DateTime<Utc>,
     #[serde(default)]
     pub last_request_event_at: Option<DateTime<Utc>>,
-    /// Notificação de "pronto" ainda não entregue.
+    /// Notificação de "ready" ainda não entregue.
     #[serde(default)]
     pub notify_pending: bool,
     #[serde(default)]
@@ -304,13 +304,13 @@ impl State {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((State::default(), None)),
-            Err(e) => return Err(e).context("falha ao ler state.json"),
+            Err(e) => return Err(e).context("failed to read state.json"),
         };
         match serde_json::from_str(&text) {
             Ok(s) => Ok((s, None)),
             Err(_) => {
                 let bak = path.with_extension(format!("json.corrupt-{}", Utc::now().format("%Y%m%d%H%M%S")));
-                std::fs::rename(path, &bak).context("falha ao isolar state.json corrompido")?;
+                std::fs::rename(path, &bak).context("failed to set aside the corrupted state.json")?;
                 Ok((State::default(), Some(bak)))
             }
         }
@@ -319,20 +319,20 @@ impl State {
     /// Leitura sem efeitos colaterais (para `status` e para o TUI).
     pub fn read(path: &Path) -> Result<State> {
         match std::fs::read_to_string(path) {
-            Ok(t) => serde_json::from_str(&t).context("state.json inválido"),
+            Ok(t) => serde_json::from_str(&t).context("invalid state.json"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
-            Err(e) => Err(e).context("falha ao ler state.json"),
+            Err(e) => Err(e).context("failed to read state.json"),
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let dir = path.parent().context("caminho de estado sem diretório")?;
-        std::fs::create_dir_all(dir).context("falha ao criar o diretório de estado")?;
+        let dir = path.parent().context("state path has no directory")?;
+        std::fs::create_dir_all(dir).context("failed to create the state directory")?;
         let tmp = path.with_extension("json.tmp");
-        let mut f = std::fs::File::create(&tmp).context("falha ao salvar state.json")?;
+        let mut f = std::fs::File::create(&tmp).context("failed to save state.json")?;
         f.write_all(serde_json::to_string_pretty(self)?.as_bytes())?;
         f.sync_all()?;
-        std::fs::rename(&tmp, path).context("falha ao salvar state.json")?;
+        std::fs::rename(&tmp, path).context("failed to save state.json")?;
         Ok(())
     }
 }

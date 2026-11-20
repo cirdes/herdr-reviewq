@@ -55,19 +55,19 @@ impl Facts {
     /// Por que o worktree não está impecável (sem olhar branch/HEAD). `None` = impecável.
     pub fn dirt(&self) -> Option<String> {
         if self.op_in_progress {
-            return Some("operação git em andamento".into());
+            return Some("git operation in progress".into());
         }
         if !self.tracked.is_empty() {
-            return Some(format!("arquivos alterados: {}", sample(&self.tracked)));
+            return Some(format!("modified files: {}", sample(&self.tracked)));
         }
         if !self.flagged.is_empty() {
-            return Some(format!("arquivos com skip-worktree/assume-unchanged: {}", sample(&self.flagged)));
+            return Some(format!("files with skip-worktree/assume-unchanged: {}", sample(&self.flagged)));
         }
         if !self.untracked.is_empty() {
-            return Some(format!("arquivos novos: {}", sample(&self.untracked)));
+            return Some(format!("new files: {}", sample(&self.untracked)));
         }
         if !self.foreign_ignored.is_empty() {
-            return Some(format!("ignorados fora da lista de descartáveis: {}", sample(&self.foreign_ignored)));
+            return Some(format!("ignored files outside the disposable list: {}", sample(&self.foreign_ignored)));
         }
         None
     }
@@ -87,7 +87,7 @@ pub fn collect(runner: &dyn Runner, path: &Path, disposable: &[String]) -> Resul
         return Ok(Facts::missing());
     }
     if !path.join(".git").exists() {
-        return Err(anyhow!("{} existe mas não é um worktree git", path.display()));
+        return Err(anyhow!("{} exists but is not a git worktree", path.display()));
     }
     let git = Git::read_only(runner);
     let branch = {
@@ -120,15 +120,15 @@ pub fn divergence(rec: &PrRecord, f: &Facts) -> Option<Divergence> {
     }
     if f.branch.as_deref() != Some(rec.head_ref.as_str()) {
         return Some(Divergence::Diverged(format!(
-            "trocou para {}",
-            f.branch.as_deref().unwrap_or("HEAD destacado")
+            "switched to {}",
+            f.branch.as_deref().unwrap_or("detached HEAD")
         )));
     }
     if rec.managed_sha.is_none() {
-        return Some(Divergence::Diverged("sha gerenciado desconhecido".into()));
+        return Some(Divergence::Diverged("unknown managed sha".into()));
     }
     if f.head != rec.managed_sha {
-        return Some(Divergence::Diverged("HEAD mudou (commit ou reset local)".into()));
+        return Some(Divergence::Diverged("HEAD changed (local commit or reset)".into()));
     }
     f.dirt().map(Divergence::Diverged)
 }
@@ -244,7 +244,7 @@ mod tests {
         let f = facts(&wt);
         let mut rec = crate::state::PrRecord::fixture("o/r", 1, "feat/x", f.head.as_deref().unwrap());
         rec.managed_sha = None;
-        assert!(matches!(divergence(&rec, &f), Some(Divergence::Diverged(r)) if r.contains("desconhecido")));
+        assert!(matches!(divergence(&rec, &f), Some(Divergence::Diverged(r)) if r.contains("unknown")));
     }
 
     #[test]

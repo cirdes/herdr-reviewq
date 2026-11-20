@@ -60,7 +60,7 @@ fn apply_facts(s: &mut State, input: &Input) {
             Phase::Ready | Phase::Failed { .. } => {
                 match divergence(rec, f) {
                     Some(Divergence::Missing) => {
-                        rec.phase = Phase::Blocked { reason: "worktree sumiu do disco; use retry para recriar".into() }
+                        rec.phase = Phase::Blocked { reason: "worktree is gone from disk; use retry to recreate it".into() }
                     }
                     Some(Divergence::Diverged(reason)) => rec.ownership = Ownership::Adopted { reason, at: input.now },
                     None => {}
@@ -68,8 +68,8 @@ fn apply_facts(s: &mut State, input: &Input) {
             }
             Phase::Removing => {
                 if let Some(Divergence::Diverged(reason)) = divergence(rec, f) {
-                    rec.ownership = Ownership::Adopted { reason: format!("remoção cancelada: {reason}"), at: input.now };
-                    rec.phase = Phase::Blocked { reason: format!("remoção cancelada: {reason}") };
+                    rec.ownership = Ownership::Adopted { reason: format!("removal canceled: {reason}"), at: input.now };
+                    rec.phase = Phase::Blocked { reason: format!("removal canceled: {reason}") };
                 }
             }
             _ => {}
@@ -104,7 +104,7 @@ fn reconcile_repo(s: &mut State, ops: &mut Vec<Op>, repo: &str, prs: &[PendingPr
                 rec.observed_head_sha = p.head_sha.clone();
                 match rec.ownership {
                     Ownership::Managed => rec.generation += 1,
-                    Ownership::Adopted { .. } => rec.warning = Some("autor atualizou o PR".into()),
+                    Ownership::Adopted { .. } => rec.warning = Some("author updated the PR".into()),
                 }
             }
             if rec.ownership == Ownership::Managed {
@@ -159,7 +159,7 @@ fn reconcile_repo(s: &mut State, ops: &mut Vec<Op>, repo: &str, prs: &[PendingPr
         .map(|(k, _)| k.clone())
         .collect();
     for k in gone {
-        let rec = s.prs.get_mut(&k).expect("chave existe");
+        let rec = s.prs.get_mut(&k).expect("key exists");
         rec.remote = Remote::NotPending;
         if rec.ownership != Ownership::Managed {
             continue;
@@ -420,7 +420,7 @@ mod tests {
         let (s, ops) = run(&with(rec), &snap(vec![pr(1, "a2")]), &BTreeMap::new());
         // Só a base: o worktree adotado não é tocado.
         assert_eq!(ops, vec![Op::SyncBase(key(1))]);
-        assert_eq!(s.get(&key(1)).unwrap().warning.as_deref(), Some("autor atualizou o PR"));
+        assert_eq!(s.get(&key(1)).unwrap().warning.as_deref(), Some("author updated the PR"));
     }
 
     #[test]
@@ -514,7 +514,7 @@ mod tests {
     fn blocked_without_branch_is_forgotten_when_not_pending() {
         let mut rec = PrRecord::fixture(REPO, 1, "feat/x", "a1");
         rec.phase = Phase::Blocked {
-            reason: "branch já existe".into(),
+            reason: "branch already exists".into(),
         };
         rec.created_branch = false;
         let (s, ops) = run(&with(rec), &snap(vec![]), &BTreeMap::new());
@@ -542,11 +542,11 @@ mod tests {
         let final_rec = s.get(&key(1)).unwrap();
         assert!(matches!(
             &final_rec.ownership,
-            Ownership::Adopted { reason, .. } if reason.contains("remoção cancelada") && reason.contains("notas.txt")
+            Ownership::Adopted { reason, .. } if reason.contains("removal canceled") && reason.contains("notas.txt")
         ));
         assert!(matches!(
             &final_rec.phase,
-            Phase::Blocked { reason } if reason.contains("remoção cancelada")
+            Phase::Blocked { reason } if reason.contains("removal canceled")
         ));
     }
 

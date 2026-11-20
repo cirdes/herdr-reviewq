@@ -96,8 +96,8 @@ const EXTRAS_BUDGET: Duration = Duration::from_secs(30);
 /// Linha do log quando o painel fica de pé; registra a recuperação depois de falhas.
 fn panel_ok_message(failures: u32) -> String {
     match failures {
-        0 => "painel reviewq garantido".into(),
-        n => format!("painel reviewq garantido (recuperado depois de {n} falhas seguidas)"),
+        0 => "reviewq panel ensured".into(),
+        n => format!("reviewq panel ensured (recovered after {n} failures in a row)"),
     }
 }
 
@@ -105,7 +105,7 @@ impl<'a> Daemon<'a> {
     pub fn new(paths: Paths, cfg: Config, runner: &'a dyn Runner, herdr: &'a dyn Herdr, wrap: Wrap) -> Result<Self> {
         let (mut state, corrupt) = State::load(&paths.state_file())?;
         if let Some(p) = corrupt {
-            let m = format!("state.json corrompido; isolado em {} e o estado recomeçou vazio", p.display());
+            let m = format!("state.json corrupted; set aside at {} and the state restarted empty", p.display());
             info(&m);
             state.push_alert(m);
         }
@@ -166,9 +166,9 @@ impl<'a> Daemon<'a> {
             }
             Err(e) => {
                 self.panel_failures += 1;
-                info(&format!("painel reviewq (falha {} seguida): {e:#}", self.panel_failures));
+                info(&format!("reviewq panel (failure {} in a row): {e:#}", self.panel_failures));
                 if self.panel_failures >= 2 && !self.panel_alerted {
-                    self.state.push_alert(format!("painel reviewq não abriu: {e:#}"));
+                    self.state.push_alert(format!("reviewq panel did not open: {e:#}"));
                     self.panel_alerted = true;
                     if let Err(e) = self.save() {
                         info(&format!("{e:#}"));
@@ -198,18 +198,18 @@ impl<'a> Daemon<'a> {
                 unsafe {
                     libc::killpg(sp.pgid, libc::SIGKILL);
                 }
-                let m = format!("setup órfão de {} encerrado (grupo {})", sp.key, sp.pgid);
+                let m = format!("orphan setup of {} stopped (group {})", sp.key, sp.pgid);
                 info(&m);
                 self.state.push_alert(m);
             }
             Some(_) => {
                 // pid reutilizado por outro processo: não mexe
-                let m = format!("não confirmei que o grupo {} é o setup antigo de {}; nada foi encerrado", sp.pgid, sp.key);
+                let m = format!("could not confirm that group {} is the old setup of {}; nothing was stopped", sp.pgid, sp.key);
                 info(&m);
                 self.state.push_alert(m);
             }
             None => self.state.push_alert(format!(
-                "setup de {} pode ter deixado processos no grupo {}; confira com `pgrep -lg {}`",
+                "setup of {} may have left processes in group {}; check with `pgrep -lg {}`",
                 sp.key, sp.pgid, sp.pgid
             )),
         }
@@ -255,7 +255,7 @@ impl<'a> Daemon<'a> {
             }
             Ok(Some(_)) => {}
             Ok(None) => self.window_alerted = false,
-            Err(e) => info(&format!("checagem da janela: {e:#}")),
+            Err(e) => info(&format!("window check: {e:#}")),
         }
     }
 
@@ -265,7 +265,7 @@ impl<'a> Daemon<'a> {
             let s = if !repo.path.join(".git").exists() {
                 RepoSnapshot::Failed(FetchError {
                     kind: ErrorKind::Other,
-                    message: format!("clone não encontrado em {}", repo.path.display()),
+                    message: format!("clone not found at {}", repo.path.display()),
                 })
             } else {
                 github::fetch_pending(self.runner, &repo.name)
@@ -282,8 +282,8 @@ impl<'a> Daemon<'a> {
         });
         match auth_err {
             Some(msg) if !self.state.auth_error_notified => {
-                info(&format!("gh sem autenticação: {msg}"));
-                if self.herdr.notify("reviewq: gh sem autenticação", "rode gh auth login nesta máquina", &self.cfg.notify.sound).is_ok() {
+                info(&format!("gh not authenticated: {msg}"));
+                if self.herdr.notify("reviewq: gh not authenticated", "run gh auth login on this machine", &self.cfg.notify.sound).is_ok() {
                     self.state.auth_error_notified = true;
                 }
             }
@@ -309,7 +309,7 @@ impl<'a> Daemon<'a> {
                 Ok(f) => {
                     facts_map.insert(k.clone(), f);
                 }
-                Err(e) => info(&format!("{k}: falha lendo o worktree: {e:#}")),
+                Err(e) => info(&format!("{k}: failed to read the worktree: {e:#}")),
             }
         }
         let (next, ops) = reconcile(
@@ -324,7 +324,7 @@ impl<'a> Daemon<'a> {
         );
         let previous = std::mem::replace(&mut self.state, next);
         if let Err(e) = self.save() {
-            info(&format!("{e:#}; ciclo interrompido antes de qualquer efeito"));
+            info(&format!("{e:#}; cycle interrupted before any effect"));
             self.state = previous;
             return;
         }
@@ -340,7 +340,7 @@ impl<'a> Daemon<'a> {
                 self.job = None; // Drop cancela o setup e mata o grupo
                 self.job_pid = None;
                 self.state.setup_process = None;
-                info(&format!("{key}: setup cancelado"));
+                info(&format!("{key}: setup canceled"));
             }
             info(&format!("{op:?}"));
             let ctx = Ctx { cfg: &self.cfg, runner: self.runner, herdr: self.herdr, now: Utc::now() };
@@ -348,14 +348,14 @@ impl<'a> Daemon<'a> {
                 Ok(Some(note)) => info(&format!("{key}: {note}")),
                 Ok(None) => {}
                 Err(e) => {
-                    info(&format!("{key}: {op:?} falhou: {e:#}"));
+                    info(&format!("{key}: {op:?} failed: {e:#}"));
                     if let Some(r) = self.state.get_mut(&key) {
                         r.warning = Some(format!("{e:#}"));
                     }
                 }
             }
             if let Err(e) = self.save() {
-                info(&format!("{e:#}; operações restantes adiadas"));
+                info(&format!("{e:#}; remaining operations postponed"));
                 break;
             }
         }
@@ -394,7 +394,7 @@ impl<'a> Daemon<'a> {
             for repo in &repos {
                 if stop() {
                     failed.push(repo.clone());
-                    first_err.get_or_insert_with(|| "daemon encerrando".to_string());
+                    first_err.get_or_insert_with(|| "daemon shutting down".to_string());
                     continue;
                 }
                 match github::count_reviews_today(runner, repo, &viewer, &window, deadline, stop) {
@@ -414,7 +414,7 @@ impl<'a> Daemon<'a> {
         });
         // SIGTERM no meio: a tentativa não terminou, então não é falha nem conta para o backoff
         if result.is_err() && stop() {
-            info("feitas hoje: coleta interrompida pelo encerramento do daemon; tentativa descartada");
+            info("done today: collection interrupted by daemon shutdown; attempt discarded");
             return;
         }
         // o backoff conta do FIM da tentativa
@@ -429,7 +429,7 @@ impl<'a> Daemon<'a> {
                 rt.backoff_until = None;
             }
             Err((err, failed)) => {
-                info(&format!("feitas hoje: coleta falhou: {err}"));
+                info(&format!("done today: collection failed: {err}"));
                 rt.failures = rt.failures.saturating_add(1);
                 rt.backoff_until = Some(ended + chrono::Duration::seconds(backoff_secs(rt.failures)));
                 rt.last_attempt = Some(ReviewsTodayAttempt { at: ended, ok: false, error: Some(err), failed_repos: failed });
@@ -472,10 +472,10 @@ impl<'a> Daemon<'a> {
         match self.herdr.list_agents(deadline) {
             Ok(agents) => {
                 for k in crate::agents::apply_agents(&mut next, &agents, now) {
-                    info(&format!("{k}: agente aberto no worktree"));
+                    info(&format!("{k}: agent open in the worktree"));
                 }
             }
-            Err(e) => info(&format!("agentes do herdr: {e:#}")),
+            Err(e) => info(&format!("herdr agents: {e:#}")),
         }
         let repos: Vec<String> = self.cfg.repos.iter().map(|r| r.name.clone()).collect();
         for repo in &repos {
@@ -503,7 +503,7 @@ impl<'a> Daemon<'a> {
                     open.repos.insert(repo.clone(), crate::state::OpenPrsRepo { prs, default_branch, as_of: now });
                 }
                 // falha mantém a última coleta boa: a pilha pode ficar velha, nunca some
-                Err(e) => info(&format!("PRs abertos em {repo}: {}", e.message)),
+                Err(e) => info(&format!("open PRs in {repo}: {}", e.message)),
             }
         }
         if stop() {
@@ -513,7 +513,7 @@ impl<'a> Daemon<'a> {
         my.repos.retain(|k, _| repos.contains(k));
         my.errors.retain(|k, _| repos.contains(k));
         match github::fetch_viewer(self.runner, deadline) {
-            Err(e) => info(&format!("meus PRs: viewer: {}", e.message)),
+            Err(e) => info(&format!("my PRs: viewer: {}", e.message)),
             Ok(viewer) => {
                 if my.viewer.as_deref() != Some(viewer.as_str()) {
                     // outra conta: nada da anterior pode sobrar, mesmo que os repos falhem agora
@@ -530,7 +530,7 @@ impl<'a> Daemon<'a> {
                             my.repos.insert(repo.clone(), crate::state::MyPrsRepo { prs: r.prs, opened_24h: r.opened_24h, as_of: now });
                         }
                         Err(e) => {
-                            info(&format!("meus PRs em {repo}: {}", e.message));
+                            info(&format!("my PRs in {repo}: {}", e.message));
                             my.errors.insert(repo.clone(), e.message);
                         }
                     }
@@ -570,7 +570,7 @@ impl<'a> Daemon<'a> {
         for repo in &self.cfg.repos {
             if repo.path.join(".git").exists() {
                 if let Err(e) = Git::new(self.runner).prune_backups(&repo.path, Utc::now(), 14) {
-                    info(&format!("{}: falha ao podar backups: {e:#}", repo.name));
+                    info(&format!("{}: failed to prune backups: {e:#}", repo.name));
                 }
             }
         }
@@ -597,7 +597,7 @@ impl<'a> Daemon<'a> {
             if status == JobStatus::Running {
                 return;
             }
-            let job = self.job.take().expect("job existe");
+            let job = self.job.take().expect("job exists");
             self.job_pid = None;
             self.state.setup_process = None;
             self.finish_job(&job, status);
@@ -616,9 +616,9 @@ impl<'a> Daemon<'a> {
             .map(|r| r.key.clone())
             .collect();
         for k in missing {
-            info(&format!("{k}: repo fora da config; setup não iniciado"));
+            info(&format!("{k}: repo is not in the config; setup not started"));
             if let Some(r) = self.state.get_mut(&k) {
-                r.phase = Phase::Failed { step: "iniciar setup".into(), reason: "repo fora da config".into() };
+                r.phase = Phase::Failed { step: "iniciar setup".into(), reason: "repo is not in the config".into() };
             }
             if let Err(e) = self.save() {
                 info(&format!("{e:#}"));
@@ -660,7 +660,7 @@ impl<'a> Daemon<'a> {
             || rec.phase != Phase::Preparing
             || rec.managed_sha.as_deref() != Some(job.target_sha.as_str())
         {
-            info(&format!("{key}: resultado de setup obsoleto descartado"));
+            info(&format!("{key}: stale setup result discarded"));
             return;
         }
         let facts = self
@@ -671,21 +671,21 @@ impl<'a> Daemon<'a> {
         let Some(rec) = self.state.get_mut(&key) else { return };
         match status {
             JobStatus::Succeeded => {
-                info(&format!("{key}: pronto"));
+                info(&format!("{key}: ready"));
                 rec.phase = Phase::Ready;
                 rec.prepared_sha = rec.managed_sha.clone();
                 rec.notify_pending = on_ready;
             }
             JobStatus::Failed { step, reason } => {
-                info(&format!("{key}: setup falhou em {step}: {reason}"));
+                info(&format!("{key}: setup failed at {step}: {reason}"));
                 rec.phase = Phase::Failed { step, reason };
             }
             JobStatus::Running => {}
         }
         if rec.ownership == Ownership::Managed {
             if let Some(Divergence::Diverged(reason)) = facts.as_ref().and_then(|f| divergence(rec, f)) {
-                rec.ownership = Ownership::Adopted { reason: format!("depois do setup: {reason}"), at: Utc::now() };
-                rec.warning = Some("o worktree não ficou limpo; ele não será removido sozinho".into());
+                rec.ownership = Ownership::Adopted { reason: format!("after setup: {reason}"), at: Utc::now() };
+                rec.warning = Some("the worktree is not clean; it will not be removed automatically".into());
             }
         }
     }
@@ -707,12 +707,12 @@ impl<'a> Daemon<'a> {
         self.last_notify_try = Some(Instant::now());
         for key in pending {
             let Some(rec) = self.state.get(&key).cloned() else { continue };
-            if let Err(e) = self.herdr.notify(&format!("#{} pronto para review", key.number), &rec.title, &self.cfg.notify.sound) {
-                info(&format!("{key}: notificação falhou: {e:#}"));
+            if let Err(e) = self.herdr.notify(&format!("#{} ready for review", key.number), &rec.title, &self.cfg.notify.sound) {
+                info(&format!("{key}: notification failed: {e:#}"));
                 continue;
             }
             if let Some(ws) = &rec.workspace_id {
-                let _ = self.herdr.report_metadata(ws, &format!("#{} pronto", key.number));
+                let _ = self.herdr.report_metadata(ws, &format!("#{} ready", key.number));
             }
             if let Some(r) = self.state.get_mut(&key) {
                 r.notify_pending = false;
@@ -727,7 +727,7 @@ impl<'a> Daemon<'a> {
         let entries = match requests::list(&self.paths.requests_dir()) {
             Ok(e) => e,
             Err(e) => {
-                info(&format!("falha lendo pedidos: {e:#}"));
+                info(&format!("failed to read requests: {e:#}"));
                 return false;
             }
         };
@@ -738,10 +738,10 @@ impl<'a> Daemon<'a> {
                     let id = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                     let result = (!self.state.request_seen(&id)).then(|| RequestResult {
                         id,
-                        kind: "inválido".into(),
+                        kind: "invalid".into(),
                         pr: None,
                         ok: false,
-                        message: format!("pedido ilegível: {err}"),
+                        message: format!("unreadable request: {err}"),
                         at: Utc::now(),
                     });
                     (path, result)
@@ -761,10 +761,10 @@ impl<'a> Daemon<'a> {
                             self.counter_requested = true;
                             self.extras_requested = true;
                         }
-                        info(&format!("pedido {:?} {:?}: {message}", req.kind, req.pr));
+                        info(&format!("request {:?} {:?}: {message}", req.kind, req.pr));
                         let result = RequestResult {
                             id: req.id.clone(),
-                            kind: format!("{:?}", req.kind).to_lowercase(),
+                            kind: req.kind.name().into(),
                             pr: req.pr.clone(),
                             ok,
                             message,
@@ -779,7 +779,7 @@ impl<'a> Daemon<'a> {
             }
             // o resultado precisa estar em disco antes de apagar o pedido
             if let Err(e) = self.save() {
-                info(&format!("{e:#}; pedido mantido para nova tentativa"));
+                info(&format!("{e:#}; request kept for another attempt"));
                 break;
             }
             let _ = requests::ack(&path);
@@ -789,57 +789,50 @@ impl<'a> Daemon<'a> {
 
     fn handle_request(&mut self, req: &Request) -> Result<String> {
         if req.kind == RequestKind::Sync {
-            return Ok("sincronizando".into());
+            return Ok("syncing".into());
+        }
+        if req.kind == RequestKind::ReleaseAll {
+            return self.release_all();
         }
         let raw = req.pr.as_deref().unwrap_or("");
-        let key = PrKey::parse(raw).with_context(|| format!("PR inválido {raw:?} (use owner/repo#n)"))?;
+        let key = PrKey::parse(raw).with_context(|| format!("invalid PR {raw:?} (use owner/repo#n)"))?;
         if self.state.get(&key).is_none() {
-            bail!("{key} não está sendo acompanhado");
+            bail!("{key} is not being tracked");
         }
         if req.kind == RequestKind::Release {
-            if self.job.as_ref().is_some_and(|j| j.key == key) {
-                self.job = None;
-                self.job_pid = None;
-                self.state.setup_process = None;
-            }
-            let ctx = Ctx { cfg: &self.cfg, runner: self.runner, herdr: self.herdr, now: Utc::now() };
-            return executor::release(&ctx, &mut self.state, &key);
+            return self.release(&key);
         }
         if req.kind == RequestKind::Adopt {
-            if self.job.as_ref().is_some_and(|j| j.key == key) {
-                self.job = None;
-                self.job_pid = None;
-                self.state.setup_process = None;
-            }
-            let rec = self.state.get_mut(&key).expect("checado acima");
+            self.cancel_setup_of(&key);
+            let rec = self.state.get_mut(&key).expect("checked above");
             if rec.ownership == Ownership::Managed {
-                rec.ownership = Ownership::Adopted { reason: "adotado manualmente".into(), at: Utc::now() };
+                rec.ownership = Ownership::Adopted { reason: "adopted manually".into(), at: Utc::now() };
             }
             if rec.phase == Phase::Preparing {
-                // setup cancelado (ou que nunca vai começar): não pode ficar "preparando" para sempre
-                rec.phase = Phase::Failed { step: "setup".into(), reason: "cancelado pela adoção".into() };
+                // setup cancelado (ou que nunca vai começar): não pode ficar "preparing" para sempre
+                rec.phase = Phase::Failed { step: "setup".into(), reason: "canceled by adoption".into() };
             }
-            return Ok(format!("{key} adotado"));
+            return Ok(format!("{key} adopted"));
         }
         let runner = self.runner;
         let repo_path = self.cfg.repo(&key.repo).map(|r| r.path.clone());
-        let rec = self.state.get_mut(&key).expect("checado acima");
+        let rec = self.state.get_mut(&key).expect("checked above");
         match req.kind {
             RequestKind::Retry => {
                 if rec.ownership != Ownership::Managed {
-                    bail!("{key} está adotado; use release para liberá-lo");
+                    bail!("{key} is adopted; use release to release it");
                 }
                 match rec.phase.clone() {
                     Phase::Failed { .. } => {
                         rec.phase = Phase::Preparing;
                         rec.generation += 1;
-                        Ok(format!("{key}: setup será refeito"))
+                        Ok(format!("{key}: setup will run again"))
                     }
                     Phase::Blocked { .. } if !rec.path.exists() => {
                         if rec.created_branch {
                             if let Some(path) = repo_path {
                                 if let Some(note) = executor::delete_owned_branch(&Git::new(runner), &path, rec)? {
-                                    bail!("{note}; resolva a branch antes do retry");
+                                    bail!("{note}; sort out the branch before retrying");
                                 }
                             }
                             rec.created_branch = false;
@@ -851,12 +844,56 @@ impl<'a> Daemon<'a> {
                         rec.managed_sha = None;
                         rec.prepared_sha = None;
                         rec.workspace_id = None;
-                        Ok(format!("{key}: será recriado no próximo ciclo"))
+                        Ok(format!("{key}: will be recreated in the next cycle"))
                     }
-                    _ => bail!("{key} não está em falha nem bloqueado sem worktree"),
+                    _ => bail!("{key} is neither failed nor blocked without a worktree"),
                 }
             }
-            RequestKind::Sync | RequestKind::Release | RequestKind::Adopt => unreachable!("tratados acima"),
+            RequestKind::Sync | RequestKind::Release | RequestKind::Adopt | RequestKind::ReleaseAll => unreachable!("handled above"),
+        }
+    }
+
+    /// Drops the running setup job of `key`, if any (dropping the job stops its process group).
+    fn cancel_setup_of(&mut self, key: &PrKey) {
+        if self.job.as_ref().is_some_and(|j| &j.key == key) {
+            self.job = None;
+            self.job_pid = None;
+            self.state.setup_process = None;
+        }
+    }
+
+    fn release(&mut self, key: &PrKey) -> Result<String> {
+        self.cancel_setup_of(key);
+        let ctx = Ctx { cfg: &self.cfg, runner: self.runner, herdr: self.herdr, now: Utc::now() };
+        executor::release(&ctx, &mut self.state, key)
+    }
+
+    /// Releases every adopted PR. Each one goes through the same checks as a single release, so a
+    /// worktree with local work is kept and reported; the request fails if any was kept.
+    fn release_all(&mut self) -> Result<String> {
+        let keys: Vec<PrKey> =
+            self.state.prs.values().filter(|r| r.ownership != Ownership::Managed).map(|r| r.key.clone()).collect();
+        if keys.is_empty() {
+            return Ok("no adopted PRs to release".into());
+        }
+        let (mut released, mut kept) = (vec![], vec![]);
+        for key in keys {
+            match self.release(&key) {
+                Ok(msg) => released.push(msg),
+                Err(e) => {
+                    let e = format!("{e:#}");
+                    kept.push(if e.starts_with(&key.to_string()) { e } else { format!("{key}: {e}") });
+                }
+            }
+        }
+        let summary = |n: usize, what: &str, items: &[String]| {
+            if items.is_empty() { format!("{what} {n}") } else { format!("{what} {n}: {}", items.join("; ")) }
+        };
+        let done = summary(released.len(), "released", &released);
+        if kept.is_empty() {
+            Ok(done)
+        } else {
+            bail!("{done} · {}", summary(kept.len(), "kept", &kept))
         }
     }
 }
@@ -865,7 +902,7 @@ pub fn run(paths: Paths) -> Result<()> {
     std::fs::create_dir_all(&paths.state_dir)?;
     crate::applog::init(paths.log_file());
     let lock = std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(paths.lock_file())?;
-    lock.try_lock_exclusive().context("outro daemon já está rodando (daemon.lock)")?;
+    lock.try_lock_exclusive().context("another daemon is already running (daemon.lock)")?;
     let mut cfg = Config::load(&paths.config_file, &paths.home)?;
     unsafe {
         libc::signal(libc::SIGTERM, on_signal as *const () as libc::sighandler_t);
@@ -884,11 +921,11 @@ pub fn run(paths: Paths) -> Result<()> {
             break why;
         }
         if stopping() {
-            info("daemon encerrado antes de achar um Herdr");
+            info("daemon stopped before finding a Herdr");
             return Ok(());
         }
         if !waiting_logged {
-            info("backend auto: nenhum Herdr de pé nem janela ouvindo; esperando um aparecer");
+            info("backend auto: no Herdr running and no window listening; waiting for one to show up");
             waiting_logged = true;
         }
         for _ in 0..10 {
@@ -1368,7 +1405,7 @@ mod tests {
         requests::write(&paths.requests_dir(), RequestKind::Release, Some("o/r#99".into())).unwrap();
         d.tick();
         assert!(requests::list(&paths.requests_dir()).unwrap().is_empty());
-        assert!(d.state.last_requests.iter().any(|r| r.kind == "inválido" && !r.ok));
+        assert!(d.state.last_requests.iter().any(|r| r.kind == "invalid" && !r.ok));
         assert!(d.state.last_requests.iter().any(|r| !r.ok && r.message.contains("o/r#99")));
     }
 
@@ -1382,13 +1419,47 @@ mod tests {
         let mut d = Daemon::new(paths.clone(), config(&fx, "true"), &runner, &herdr, sh).unwrap();
         let mut rec = crate::state::PrRecord::fixture("o/r", 5, "feat/x", "s");
         rec.ownership = Ownership::Adopted { reason: "x".into(), at: Utc::now() };
-        rec.phase = Phase::Blocked { reason: "remoção cancelada".into() };
+        rec.phase = Phase::Blocked { reason: "removal canceled".into() };
         d.state.insert(rec);
         requests::write(&paths.requests_dir(), RequestKind::Retry, Some("o/r#5".into())).unwrap();
         d.tick();
         let rec = d.state.get(&PrKey::new("o/r", 5)).unwrap();
         assert!(matches!(rec.ownership, Ownership::Adopted { .. }));
         assert!(d.state.last_requests.iter().any(|r| !r.ok && r.message.contains("release")));
+    }
+
+    #[test]
+    fn release_all_releases_every_adopted_and_reports_the_kept_ones() {
+        let fx = fixture("feat/x");
+        let paths = Paths::from_home(fx.root.join("home"));
+        let runner = Routing { gh: FakeRunner::new() };
+        none_pending(&runner);
+        let herdr = FakeHerdr::new();
+        let mut d = Daemon::new(paths.clone(), config(&fx, "true"), &runner, &herdr, sh).unwrap();
+        requests::write(&paths.requests_dir(), RequestKind::ReleaseAll, None).unwrap();
+        d.process_requests();
+        let last = d.state.last_requests.last().unwrap();
+        assert!(last.ok && last.kind == "release_all" && last.message.contains("no adopted"), "{last:?}");
+
+        let adopted = |n: u64| {
+            let mut rec = crate::state::PrRecord::fixture("o/r", n, &format!("feat/{n}"), "s");
+            rec.ownership = Ownership::Adopted { reason: "x".into(), at: Utc::now() };
+            rec.path = fx.root.join(format!("wt-{n}"));
+            rec
+        };
+        d.state.insert(adopted(5));
+        let broken = adopted(6);
+        std::fs::create_dir_all(&broken.path).unwrap(); // existe mas não é worktree: release recusa
+        d.state.insert(broken);
+        d.state.insert(crate::state::PrRecord::fixture("o/r", 7, "feat/7", "s"));
+        requests::write(&paths.requests_dir(), RequestKind::ReleaseAll, None).unwrap();
+        d.process_requests();
+        let last = d.state.last_requests.last().unwrap();
+        assert!(!last.ok, "{last:?}");
+        assert!(last.message.contains("released 1: o/r#5 released") && last.message.contains("kept 1: o/r#6"), "{}", last.message);
+        assert!(d.state.get(&PrKey::new("o/r", 5)).is_none());
+        assert!(d.state.get(&PrKey::new("o/r", 6)).is_some());
+        assert!(d.state.get(&PrKey::new("o/r", 7)).is_some(), "managed PRs are not touched");
     }
 
     #[test]
@@ -1442,7 +1513,7 @@ mod tests {
         let herdr = FakeHerdr::new();
         let d = Daemon::new(paths.clone(), config(&fx, "true"), &runner, &herdr, sh).unwrap();
         assert!(d.state.prs.is_empty());
-        assert!(d.state.alerts.iter().any(|a| a.message.contains("corrompido")));
+        assert!(d.state.alerts.iter().any(|a| a.message.contains("corrupted")));
     }
 
     #[test]
@@ -1465,7 +1536,7 @@ mod tests {
         let d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
         assert!(orphan.wait_timeout(Duration::from_secs(3)).unwrap().is_some(), "órfão continua vivo");
         assert!(d.state.setup_process.is_none());
-        assert!(d.state.alerts.iter().any(|a| a.message.contains("órfão")));
+        assert!(d.state.alerts.iter().any(|a| a.message.contains("orphan")));
     }
 
     #[test]
@@ -1545,7 +1616,7 @@ mod tests {
         assert!(d.job.is_none(), "setup não pode reiniciar em PR adotado");
         assert_eq!(
             d.state.get(&PrKey::new("o/r", 7)).unwrap().phase,
-            Phase::Failed { step: "setup".into(), reason: "cancelado pela adoção".into() }
+            Phase::Failed { step: "setup".into(), reason: "canceled by adoption".into() }
         );
     }
 
@@ -1587,7 +1658,7 @@ mod tests {
         d.state.insert(new);
         d.drive_setup();
         assert!(d.job.as_ref().is_some_and(|j| j.key == PrKey::new("o/r", 2)));
-        assert!(matches!(&d.state.get(&PrKey::new("x/fora", 1)).unwrap().phase, Phase::Failed { reason, .. } if reason.contains("fora da config")));
+        assert!(matches!(&d.state.get(&PrKey::new("x/fora", 1)).unwrap().phase, Phase::Failed { reason, .. } if reason.contains("not in the config")));
     }
 
     #[test]
@@ -1608,7 +1679,7 @@ mod tests {
         let herdr = FakeHerdr::new();
         let d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
         assert!(other.try_wait().unwrap().is_none(), "processo alheio foi morto");
-        assert!(d.state.alerts.iter().any(|a| a.message.contains("não confirmei")));
+        assert!(d.state.alerts.iter().any(|a| a.message.contains("could not confirm")));
         let _ = other.kill();
         let _ = other.wait();
     }
@@ -1621,7 +1692,7 @@ mod tests {
         let herdr = FakeHerdr::new();
         herdr.fail_herdr.set(true);
         let mut d = Daemon::new(paths, config(&fx, "true"), &runner, &herdr, sh).unwrap();
-        let panel_alerts = |d: &Daemon| d.state.alerts.iter().filter(|a| a.message.contains("painel")).count();
+        let panel_alerts = |d: &Daemon| d.state.alerts.iter().filter(|a| a.message.contains("panel")).count();
         d.ensure_panel_now();
         assert!(!d.panel_ensured);
         assert_eq!(panel_alerts(&d), 0, "uma falha isolada não vira alerta");
@@ -1643,8 +1714,8 @@ mod tests {
 
     #[test]
     fn panel_success_message_records_recovery() {
-        assert_eq!(panel_ok_message(0), "painel reviewq garantido");
-        assert_eq!(panel_ok_message(2), "painel reviewq garantido (recuperado depois de 2 falhas seguidas)");
+        assert_eq!(panel_ok_message(0), "reviewq panel ensured");
+        assert_eq!(panel_ok_message(2), "reviewq panel ensured (recovered after 2 failures in a row)");
     }
 
     #[test]

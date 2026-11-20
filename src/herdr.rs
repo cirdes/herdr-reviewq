@@ -155,7 +155,7 @@ fn is_tui_argv(argv: &[String]) -> bool {
 }
 
 fn parse_as<T: serde::de::DeserializeOwned>(v: Value, what: &str) -> Result<T> {
-    serde_json::from_value(v).with_context(|| format!("resposta inesperada do herdr em {what}"))
+    serde_json::from_value(v).with_context(|| format!("unexpected herdr response in {what}"))
 }
 
 fn canon(p: &Path) -> PathBuf {
@@ -164,15 +164,15 @@ fn canon(p: &Path) -> PathBuf {
 
 pub fn parse_response(out: &Output) -> Result<Value> {
     let text = if out.stdout.trim().is_empty() { out.stderr.trim() } else { out.stdout.trim() };
-    let v: Value = serde_json::from_str(text).with_context(|| format!("resposta inválida do herdr: {text}"))?;
+    let v: Value = serde_json::from_str(text).with_context(|| format!("invalid herdr response: {text}"))?;
     if let Some(err) = v.get("error") {
         bail!(
             "herdr: {} ({})",
-            err.get("message").and_then(Value::as_str).unwrap_or("erro"),
+            err.get("message").and_then(Value::as_str).unwrap_or("error"),
             err.get("code").and_then(Value::as_str).unwrap_or("?")
         );
     }
-    v.get("result").cloned().ok_or_else(|| anyhow!("resposta do herdr sem result"))
+    v.get("result").cloned().ok_or_else(|| anyhow!("herdr response without result"))
 }
 
 impl<'a> HerdrCli<'a> {
@@ -220,7 +220,7 @@ impl<'a> HerdrCli<'a> {
     fn until(&self, deadline: Instant) -> Result<Duration> {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            bail!("prazo esgotado esperando o herdr");
+            bail!("timed out waiting for herdr");
         }
         Ok(left.min(self.timeout))
     }
@@ -228,7 +228,7 @@ impl<'a> HerdrCli<'a> {
     fn exec(&self, cmd: Cmd) -> Result<()> {
         let out = self.runner.run(&cmd)?;
         if !out.success() {
-            bail!("{} falhou: {} {}", cmd.line(), out.stderr.trim(), out.stdout.trim());
+            bail!("{} failed: {} {}", cmd.line(), out.stderr.trim(), out.stdout.trim());
         }
         Ok(())
     }
@@ -251,8 +251,8 @@ impl Herdr for HerdrCli<'_> {
                 .args(["--no-focus", "--trust-repository"])
                 .timeout(Duration::from_secs(300)),
         )?;
-        let ws = res.pointer("/workspace/workspace_id").and_then(Value::as_str).context("worktree_created sem workspace_id")?;
-        let path = res.pointer("/worktree/path").and_then(Value::as_str).context("worktree_created sem path")?;
+        let ws = res.pointer("/workspace/workspace_id").and_then(Value::as_str).context("worktree_created without workspace_id")?;
+        let path = res.pointer("/worktree/path").and_then(Value::as_str).context("worktree_created without path")?;
         Ok(Created { workspace_id: ws.into(), path: path.into() })
     }
 
@@ -313,7 +313,7 @@ impl Herdr for HerdrCli<'_> {
                 .arg(cwd.to_string_lossy())
                 .timeout(self.until(deadline)?),
         )?;
-        let ws = res.pointer("/workspace/workspace_id").and_then(Value::as_str).context("workspace create sem workspace_id")?;
+        let ws = res.pointer("/workspace/workspace_id").and_then(Value::as_str).context("workspace create without workspace_id")?;
         let root = res.pointer("/root_pane/pane_id").and_then(Value::as_str).map(String::from);
         Ok((ws.into(), root))
     }
@@ -394,7 +394,7 @@ const BRIDGE_DOC: &str = "reviewq-bridge";
 const BRIDGE_FRESH_MS: i64 = 120_000;
 const APP_BIN: &str = "herdr-app";
 const HC_BIN: &str = "hc";
-const BRIDGE_HELP: &str = "instale o mod reviewq-bridge na janela (README, \"Window on another machine\")";
+const BRIDGE_HELP: &str = "install the reviewq-bridge mod in the window (README, \"Window on another machine\")";
 
 /// `auto`: sem `herdr-app` aqui, a janela só pode estar em outra máquina.
 pub fn window_is_remote(window: crate::config::Window, app_here: bool) -> bool {
@@ -425,12 +425,12 @@ pub struct BackendSignals {
 /// Backend escolhido e o motivo, para o log. `None`: `auto` sem nenhum sinal.
 pub fn pick_backend(requested: Backend, s: &BackendSignals) -> Option<(Backend, &'static str)> {
     Some(match requested {
-        Backend::Herdr | Backend::HerdrApp => (requested, "da config"),
-        Backend::Auto if s.in_herdr_pane => (Backend::Herdr, "auto: painel num pane do herdr"),
-        Backend::Auto if s.in_app_terminal => (Backend::HerdrApp, "auto: painel num terminal do herdr-app"),
-        Backend::Auto if s.bridge_fresh => (Backend::HerdrApp, "auto: janela do herdr-app ouvindo esta máquina"),
-        Backend::Auto if s.herdr_up => (Backend::Herdr, "auto: herdr do terminal de pé"),
-        Backend::Auto if s.app_here => (Backend::HerdrApp, "auto: herdr-app instalado aqui"),
+        Backend::Herdr | Backend::HerdrApp => (requested, "from the config"),
+        Backend::Auto if s.in_herdr_pane => (Backend::Herdr, "auto: panel in a herdr pane"),
+        Backend::Auto if s.in_app_terminal => (Backend::HerdrApp, "auto: panel in a herdr-app terminal"),
+        Backend::Auto if s.bridge_fresh => (Backend::HerdrApp, "auto: herdr-app window listening to this machine"),
+        Backend::Auto if s.herdr_up => (Backend::Herdr, "auto: terminal herdr running"),
+        Backend::Auto if s.app_here => (Backend::HerdrApp, "auto: herdr-app installed here"),
         Backend::Auto => return None,
     })
 }
@@ -488,12 +488,12 @@ pub fn space_id(path: &Path) -> String {
 
 fn app_json(out: &Output, what: &str) -> Result<Value> {
     let text = if out.stdout.trim().is_empty() { out.stderr.trim() } else { out.stdout.trim() };
-    let v: Value = serde_json::from_str(text).with_context(|| format!("resposta inválida de {what}: {text}"))?;
+    let v: Value = serde_json::from_str(text).with_context(|| format!("invalid response from {what}: {text}"))?;
     if let Some(err) = v.get("error") {
         bail!("{what}: {}", err.as_str().map(String::from).unwrap_or_else(|| err.to_string()));
     }
     if !out.success() {
-        bail!("{what} falhou: {text}");
+        bail!("{what} failed: {text}");
     }
     Ok(v)
 }
@@ -541,14 +541,14 @@ impl<'a> HerdrApp<'a> {
         let cmd = Cmd::new("sh").args(["-c", "printf '%s\\n' \"$1\" | hc connect", "sh"]).arg(req.to_string()).timeout(timeout);
         let out = self.runner.run(&cmd)?;
         if !out.success() {
-            bail!("hc {method} falhou: {}", out.stderr.trim());
+            bail!("hc {method} failed: {}", out.stderr.trim());
         }
-        let v: Value = serde_json::from_str(out.stdout.trim()).with_context(|| format!("resposta inválida de hc {method}: {}", out.stdout.trim()))?;
+        let v: Value = serde_json::from_str(out.stdout.trim()).with_context(|| format!("invalid response from hc {method}: {}", out.stdout.trim()))?;
         if let Some(err) = v.get("error") {
             let kind = err.pointer("/data/kind").and_then(Value::as_str).unwrap_or("error");
             return Ok(Err(format!("{kind}: {}", err.get("message").and_then(Value::as_str).unwrap_or_default())));
         }
-        v.get("result").cloned().map(Ok).with_context(|| format!("hc {method} sem result"))
+        v.get("result").cloned().map(Ok).with_context(|| format!("hc {method} without result"))
     }
 
     fn doc_get(&self, name: &str, timeout: Duration) -> Result<(Value, u64)> {
@@ -569,13 +569,13 @@ impl<'a> HerdrApp<'a> {
                 Err(e) => bail!("hc doc.set {name}: {e}"),
             }
         }
-        bail!("doc {name} mudou {DOC_RETRIES} vezes seguidas enquanto o reviewq gravava")
+        bail!("doc {name} changed {DOC_RETRIES} times in a row while reviewq was writing")
     }
 
     /// Muda os spaces que a janela guarda aqui. Sem o doc, a janela nunca abriu esta máquina.
     fn edit_spaces(&self, mut edit: impl FnMut(&mut Vec<Value>) -> bool) -> Result<()> {
         self.doc_edit(SPACES_DOC, |doc| {
-            let spaces = doc.get_mut("spaces").and_then(Value::as_array_mut).context("a janela ainda não abriu os spaces desta máquina")?;
+            let spaces = doc.get_mut("spaces").and_then(Value::as_array_mut).context("the window has not opened this machine's spaces yet")?;
             Ok(edit(spaces))
         })
     }
@@ -614,8 +614,8 @@ impl<'a> HerdrApp<'a> {
         // O pedido fica gravado de todo jeito; sem ninguém ouvindo, quem apertou Enter precisa saber.
         match self.bridge_age_ms(timeout)? {
             Some(age) if age <= BRIDGE_FRESH_MS => Ok(()),
-            Some(age) => bail!("pedido de foco gravado, mas a janela não dá sinal há {} min: está aberta com o mod reviewq-bridge?", age / 60_000),
-            None => bail!("pedido de foco gravado, mas nenhuma janela ouve esta máquina: {BRIDGE_HELP}"),
+            Some(age) => bail!("focus request written, but the window has been silent for {} min: is it open with the reviewq-bridge mod?", age / 60_000),
+            None => bail!("focus request written, but no window is listening to this machine: {BRIDGE_HELP}"),
         }
     }
 
@@ -628,7 +628,7 @@ impl<'a> HerdrApp<'a> {
     fn until(&self, deadline: Instant) -> Result<Duration> {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            bail!("prazo esgotado esperando o herdr-app");
+            bail!("timed out waiting for herdr-app");
         }
         Ok(left.min(self.timeout))
     }
@@ -706,7 +706,7 @@ impl<'a> HerdrApp<'a> {
     fn git(&self, dir: &Path, args: &[&str]) -> Result<String> {
         let out = self.runner.run(&Cmd::new("git").cwd(dir.to_path_buf()).args(args.iter().copied()).timeout(Duration::from_secs(300)))?;
         if !out.success() {
-            bail!("git {} falhou: {}", args.join(" "), out.stderr.trim());
+            bail!("git {} failed: {}", args.join(" "), out.stderr.trim());
         }
         Ok(out.stdout)
     }
@@ -742,14 +742,14 @@ impl Herdr for HerdrApp<'_> {
         let path = terminals
             .iter()
             .find_map(|t| self.terminal(t, self.timeout).ok()?.pointer(&format!("/labels/{WORKTREE_LABEL}"))?.as_str().map(PathBuf::from))
-            .with_context(|| format!("space {id} sem o label {WORKTREE_LABEL}"))?;
+            .with_context(|| format!("space {id} without the label {WORKTREE_LABEL}"))?;
         let common = self.git(&path, &["rev-parse", "--path-format=absolute", "--git-common-dir"])?;
-        let repo = Path::new(common.trim()).parent().context("--git-common-dir sem pai")?.to_path_buf();
+        let repo = Path::new(common.trim()).parent().context("--git-common-dir has no parent")?.to_path_buf();
         let _ = self.close_space(id);
         for t in self.space_terminals(id, self.timeout)? {
             let out = self.runner.run(&self.hc(self.timeout).args(["kill", &t]))?;
             if !out.success() {
-                bail!("hc kill {t} falhou: {}", out.stderr.trim());
+                bail!("hc kill {t} failed: {}", out.stderr.trim());
             }
         }
         self.git(&repo, &["worktree", "remove", &path.to_string_lossy()]).map(|_| ())
@@ -764,7 +764,7 @@ impl Herdr for HerdrApp<'_> {
         };
         let out = self.runner.run(&Cmd::new("osascript").arg("-e").arg(script).arg(title).arg(body).timeout(self.timeout))?;
         if !out.success() {
-            bail!("osascript falhou: {}", out.stderr.trim());
+            bail!("osascript failed: {}", out.stderr.trim());
         }
         Ok(())
     }
@@ -861,7 +861,7 @@ impl Herdr for HerdrApp<'_> {
         if !self.remote || self.bridge_age_ms(self.timeout)?.is_some() {
             return Ok(None);
         }
-        Ok(Some(format!("sem herdr-app nesta máquina e nenhuma janela ouvindo: o Enter do painel não muda o space; {BRIDGE_HELP}")))
+        Ok(Some(format!("no herdr-app on this machine and no window listening: Enter in the panel does not switch the space; {BRIDGE_HELP}")))
     }
 }
 
@@ -940,14 +940,14 @@ impl FakeHerdr {
     /// Como o `HerdrCli`: prazo vencido, nenhuma chamada.
     fn before(deadline: Instant) -> Result<()> {
         if Instant::now() >= deadline {
-            bail!("prazo esgotado esperando o herdr");
+            bail!("timed out waiting for herdr");
         }
         Ok(())
     }
 
     fn check(&self, what: &str, fail: bool) -> Result<()> {
         if self.fail_herdr.get() || fail {
-            bail!("herdr {what} falhou (teste)");
+            bail!("herdr {what} failed (test)");
         }
         Ok(())
     }
@@ -989,7 +989,7 @@ impl Herdr for FakeHerdr {
 
     fn notify(&self, title: &str, body: &str, _sound: &str) -> Result<()> {
         if self.fail_notify.get() {
-            bail!("herdr fora do ar (teste)");
+            bail!("herdr down (test)");
         }
         self.notifications.borrow_mut().push(format!("{title} | {body}"));
         Ok(())
@@ -1295,7 +1295,7 @@ mod tests {
         let routing = UiRouting { bin: "herdr".into(), session: None };
         let fake = FakeRunner::new();
         let mut cfg = auto_cfg(Backend::HerdrApp);
-        assert_eq!(resolve_backend(&mut cfg, &fake, &routing, Path::new("/h"), true), Some("da config"));
+        assert_eq!(resolve_backend(&mut cfg, &fake, &routing, Path::new("/h"), true), Some("from the config"));
         assert_eq!(cfg.backend, Backend::HerdrApp);
         assert!(fake.lines().is_empty());
     }
@@ -1341,7 +1341,7 @@ mod tests {
         let h = HerdrCli::new(&slow, None).with_timeout(Duration::from_secs(5));
         let start = std::time::Instant::now();
         let err = h.list_panes("w5", start + Duration::from_millis(100)).unwrap_err().to_string();
-        assert!(err.contains("prazo"), "{err}");
+        assert!(err.contains("timed out"), "{err}");
         let infos: Vec<Cmd> = slow.calls.borrow().iter().filter(|c| c.line().contains("process-info")).cloned().collect();
         assert!(infos.len() <= 2, "parou entre panes, não varreu os 5: {}", infos.len());
         assert!(start.elapsed() < Duration::from_millis(250), "{:?}", start.elapsed());
@@ -1351,7 +1351,7 @@ mod tests {
         let slow = SlowPanes { delay: Duration::ZERO, calls: Default::default() };
         let h = HerdrCli::new(&slow, None);
         let err = h.list_panes("w5", std::time::Instant::now()).unwrap_err().to_string();
-        assert!(err.contains("prazo"), "{err}");
+        assert!(err.contains("timed out"), "{err}");
         assert!(slow.calls.borrow().is_empty(), "prazo vencido: nenhuma chamada");
     }
 
@@ -1474,7 +1474,7 @@ mod tests {
 
     #[test]
     fn remote_focus_without_a_listening_window_keeps_the_request_but_says_so() {
-        for (answer, expected) in [(no_beat(), "nenhuma janela ouve"), (beat(10 * 60_000), "não dá sinal há 10 min")] {
+        for (answer, expected) in [(no_beat(), "no window is listening"), (beat(10 * 60_000), "silent for 10 min")] {
             let fake = FakeRunner::new();
             fake.on("\"doc.get\",\"params\":{\"name\":\"reviewq-focus\"", core_ok(serde_json::json!({ "value": null, "version": 0 })));
             fake.on("doc.set", core_ok(serde_json::json!({ "version": 1 })));
@@ -1489,7 +1489,7 @@ mod tests {
     fn window_warning_only_when_no_window_ever_listened() {
         let fake = FakeRunner::new();
         fake.on("reviewq-bridge", no_beat());
-        assert!(remote(&fake).window_warning().unwrap().unwrap().contains("mod reviewq-bridge"));
+        assert!(remote(&fake).window_warning().unwrap().unwrap().contains("reviewq-bridge mod"));
         let fake = FakeRunner::new();
         fake.on("reviewq-bridge", beat(60 * 60_000));
         assert_eq!(remote(&fake).window_warning().unwrap(), None, "janela fechada não é falta de setup");
@@ -1660,10 +1660,10 @@ mod tests {
         fake.on("osascript", Output::ok(""));
         fake.on("osascript", Output::ok(""));
         let h = app(&fake);
-        h.notify("#7 pronto", "título \"com\" aspas", "request").unwrap();
+        h.notify("#7 ready", "título \"com\" aspas", "request").unwrap();
         h.notify("reviewq", "x", "none").unwrap();
         let calls = fake.calls.borrow();
-        assert_eq!(&calls[0].args[2..], ["#7 pronto", "título \"com\" aspas"]);
+        assert_eq!(&calls[0].args[2..], ["#7 ready", "título \"com\" aspas"]);
         assert!(!calls[0].args[1].contains("título"), "o texto nunca entra no script");
         assert!(calls[0].args[1].contains("sound name") && !calls[1].args[1].contains("sound name"));
     }

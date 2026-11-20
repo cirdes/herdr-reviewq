@@ -21,12 +21,12 @@ impl<'a> Ctx<'a> {
         Git::new(self.runner)
     }
     fn repo(&self, key: &PrKey) -> Result<&'a RepoConfig> {
-        self.cfg.repo(&key.repo).with_context(|| format!("repo {} fora da config", key.repo))
+        self.cfg.repo(&key.repo).with_context(|| format!("repo {} is not in the config", key.repo))
     }
 }
 
 fn record<'s>(state: &'s mut State, key: &PrKey) -> Result<&'s mut PrRecord> {
-    state.get_mut(key).with_context(|| format!("{key} não está no estado"))
+    state.get_mut(key).with_context(|| format!("{key} is not in the state"))
 }
 
 pub fn create(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<()> {
@@ -43,12 +43,12 @@ pub fn create(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<()> {
     if rec.path.exists() {
         // Sem prova de que fomos nós que criamos: nunca assume.
         rec.phase = Phase::Blocked {
-            reason: format!("{} já existe e o daemon não tem registro de tê-lo criado; confira e remova à mão", rec.path.display()),
+            reason: format!("{} already exists and the daemon has no record of creating it; check it and remove it by hand", rec.path.display()),
         };
         return Ok(());
     }
     if git.ref_sha(&repo.path, &format!("refs/heads/{}", rec.head_ref))?.is_some() {
-        rec.phase = Phase::Blocked { reason: format!("branch {} já existe no clone", rec.head_ref) };
+        rec.phase = Phase::Blocked { reason: format!("branch {} already exists in the clone", rec.head_ref) };
         return Ok(());
     }
     if let Some(parent) = rec.path.parent() {
@@ -67,11 +67,11 @@ pub fn create(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<()> {
     rec.phase = Phase::Preparing;
     rec.warning = None;
     if let Err(e) = git.set_upstream(&rec.path, &rec.head_ref) {
-        rec.warning = Some(format!("upstream não configurado: {e:#}"));
+        rec.warning = Some(format!("upstream not configured: {e:#}"));
     }
     // Falha aqui não desfaz o worktree: o SyncBase do próximo ciclo tenta de novo.
     if let Err(e) = sync_base_of(&git, &repo.path, rec) {
-        rec.warning = Some(format!("base do PR não sincronizada: {e:#}"));
+        rec.warning = Some(format!("PR base not synced: {e:#}"));
     }
     Ok(())
 }
@@ -94,7 +94,7 @@ fn sync_base_of(git: &Git, repo: &Path, rec: &mut PrRecord) -> Result<Option<Str
         rec.synced_base = Some(base);
         return Ok(None);
     }
-    git.fetch_branch(repo, &base).with_context(|| format!("base {base} não buscada"))?;
+    git.fetch_branch(repo, &base).with_context(|| format!("base {base} not fetched"))?;
     let mut note = None;
     if rec.synced_base.as_deref() != Some(base.as_str()) {
         let current = git.reviewr_base_pick(&rec.path)?;
@@ -102,7 +102,7 @@ fn sync_base_of(git: &Git, repo: &Path, rec: &mut PrRecord) -> Result<Option<Str
         if current.is_none() || current == rec.synced_base {
             git.set_reviewr_base_pick(&rec.path, &base)?;
         } else if current.as_deref() != Some(base.as_str()) {
-            note = Some(format!("base do PR agora é {base}; escolha manual do reviewr ({}) preservada", current.unwrap_or_default()));
+            note = Some(format!("PR base is now {base}; reviewer's manual choice ({}) kept", current.unwrap_or_default()));
         }
     }
     rec.synced_base = Some(base);
@@ -113,7 +113,7 @@ pub fn update(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<()> {
     let repo = ctx.repo(key)?;
     let git = ctx.git();
     let (head_ref, path, observed, managed) = {
-        let r = state.get(key).with_context(|| format!("{key} não está no estado"))?;
+        let r = state.get(key).with_context(|| format!("{key} is not in the state"))?;
         if r.ownership != Ownership::Managed {
             return Ok(());
         }
@@ -128,12 +128,12 @@ pub fn update(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<()> {
     let rec = record(state, key)?;
     match divergence(rec, &f) {
         Some(Divergence::Missing) => {
-            rec.phase = Phase::Blocked { reason: "worktree sumiu do disco; use retry para recriar".into() };
+            rec.phase = Phase::Blocked { reason: "worktree is gone from disk; use retry to recreate it".into() };
             return Ok(());
         }
         Some(Divergence::Diverged(reason)) => {
             rec.ownership = Ownership::Adopted { reason, at: ctx.now };
-            rec.warning = Some("autor atualizou o PR".into());
+            rec.warning = Some("author updated the PR".into());
             return Ok(());
         }
         None => {}
@@ -144,9 +144,9 @@ pub fn update(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<()> {
     if let Err(e) = git.reset_keep(&path, &sha) {
         if !would_overwrite(&format!("{e:#}")) {
             // ex.: index.lock de um git do usuário; segue gerenciado e o próximo ciclo tenta de novo
-            return Err(e.context("reset --keep falhou"));
+            return Err(e.context("reset --keep failed"));
         }
-        rec.ownership = Ownership::Adopted { reason: format!("atualização abortada para preservar alterações: {e:#}"), at: ctx.now };
+        rec.ownership = Ownership::Adopted { reason: format!("update aborted to keep local changes: {e:#}"), at: ctx.now };
         return Ok(());
     }
     rec.managed_sha = Some(sha);
@@ -177,13 +177,13 @@ pub fn delete_owned_branch(git: &Git, repo: &Path, rec: &PrRecord) -> Result<Opt
     let Some(expected) = &rec.managed_sha else { return Ok(None) };
     let Some(current) = git.ref_sha(repo, &format!("refs/heads/{}", rec.head_ref))? else { return Ok(None) };
     if &current != expected {
-        return Ok(Some(format!("branch {} preservada: mudou desde que o daemon a criou", rec.head_ref)));
+        return Ok(Some(format!("branch {} kept: it changed since the daemon created it", rec.head_ref)));
     }
     if git.branch_checked_out(repo, &rec.head_ref)? {
-        return Ok(Some(format!("branch {} preservada: está aberta em outro worktree", rec.head_ref)));
+        return Ok(Some(format!("branch {} kept: it is checked out in another worktree", rec.head_ref)));
     }
     if !git.delete_branch_if_at(repo, &rec.head_ref, expected)? {
-        return Ok(Some(format!("branch {} preservada: mudou durante a remoção", rec.head_ref)));
+        return Ok(Some(format!("branch {} kept: it changed during removal", rec.head_ref)));
     }
     Ok(None)
 }
@@ -192,7 +192,7 @@ pub fn delete_owned_branch(git: &Git, repo: &Path, rec: &PrRecord) -> Result<Opt
 pub fn remove(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<Option<String>> {
     let repo = ctx.repo(key)?;
     let git = ctx.git();
-    let rec = state.get(key).cloned().with_context(|| format!("{key} não está no estado"))?;
+    let rec = state.get(key).cloned().with_context(|| format!("{key} is not in the state"))?;
     if rec.ownership != Ownership::Managed {
         return Ok(None);
     }
@@ -202,8 +202,8 @@ pub fn remove(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<Option<String
     if let Some(Divergence::Diverged(reason)) = divergence(&rec, &f) {
         let r = record(state, key)?;
         r.ownership = Ownership::Adopted { reason: reason.clone(), at: ctx.now };
-        r.phase = Phase::Blocked { reason: format!("remoção cancelada: {reason}") };
-        return Ok(Some(format!("remoção cancelada: {reason}")));
+        r.phase = Phase::Blocked { reason: format!("removal canceled: {reason}") };
+        return Ok(Some(format!("removal canceled: {reason}")));
     }
     if f.exists {
         if let Some(head) = &f.head {
@@ -218,7 +218,7 @@ pub fn remove(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<Option<String
         state.push_alert(format!("{key}: {n}"));
     }
     if ctx.cfg.notify.on_removed {
-        let _ = ctx.herdr.notify(&format!("#{} removido", key.number), &rec.title, &ctx.cfg.notify.sound);
+        let _ = ctx.herdr.notify(&format!("#{} removed", key.number), &rec.title, &ctx.cfg.notify.sound);
     }
     Ok(note)
 }
@@ -227,29 +227,29 @@ pub fn remove(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<Option<String
 pub fn release(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<String> {
     let repo = ctx.repo(key)?;
     let git = ctx.git();
-    let rec = state.get(key).cloned().with_context(|| format!("{key} não está sendo acompanhado"))?;
+    let rec = state.get(key).cloned().with_context(|| format!("{key} is not being tracked"))?;
     if rec.ownership == Ownership::Managed {
-        bail!("{key} não está adotado; ele é removido sozinho quando sair da sua lista");
+        bail!("{key} is not adopted; it is removed automatically when it leaves your queue");
     }
     let workspace = if rec.path.exists() { ctx.herdr.find_open_workspace(&repo.path, &rec.path)? } else { None };
-    git.fetch_origin(&repo.path).context("não consegui atualizar o origin para confirmar que nada se perde")?;
+    git.fetch_origin(&repo.path).context("could not update origin to confirm that nothing is lost")?;
     // Depois de squash merge a branch some do origin; o head do PR continua em refs/pull/<n>/head.
     if let Err(e) = git.fetch_pull_head(&repo.path, key.number) {
-        crate::applog::info(&format!("{key}: {e:#}; a checagem segue só com as branches do origin"));
+        crate::applog::info(&format!("{key}: {e:#}; checking against origin branches only"));
     }
     let f = facts::collect(ctx.runner, &rec.path, &repo.disposable_ignored)?;
     if f.exists {
         if let Some(dirt) = f.dirt() {
-            bail!("{key} não pode ser liberado: {dirt}. Faça commit e push, ou descarte, e tente de novo");
+            bail!("{key} cannot be released: {dirt}. Commit and push, or discard, and try again");
         }
         if let Some(head) = &f.head {
             if !git.is_reachable_from_origin(&repo.path, head)? {
-                bail!("{key} não pode ser liberado: o HEAD {} tem commits que não estão no origin", &head[..head.len().min(8)]);
+                bail!("{key} cannot be released: HEAD {} has commits that are not on origin", &head[..head.len().min(8)]);
             }
         }
     }
     if f.exists && f.head.is_none() {
-        bail!("{key} não pode ser liberado: não consegui ler o HEAD");
+        bail!("{key} cannot be released: could not read HEAD");
     }
     let stashes = git.stash_count(&repo.path)?;
     if f.exists {
@@ -264,13 +264,13 @@ pub fn release(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<String> {
         state.suppressions.insert(key.to_string(), Suppression { after: rec.last_request_event_at });
     }
     state.remove(key);
-    let mut msg = format!("{key} liberado");
+    let mut msg = format!("{key} released");
     if let Some(n) = note {
         state.push_alert(format!("{key}: {n}"));
         msg.push_str(&format!("; {n}"));
     }
     if stashes > 0 {
-        msg.push_str(&format!("; atenção: há {stashes} stash(es) no repositório"));
+        msg.push_str(&format!("; note: there are {stashes} stash(es) in the repository"));
     }
     Ok(msg)
 }
@@ -460,7 +460,7 @@ mod tests {
         let ctx = Ctx { cfg: &cfg, runner: &RealRunner, herdr: &herdr, now: Utc::now() };
         let (mut s, key) = creating(&fx, &cfg);
         create(&ctx, &mut s, &key).unwrap();
-        assert!(matches!(&s.get(&key).unwrap().phase, Phase::Blocked { reason } if reason.contains("já existe")));
+        assert!(matches!(&s.get(&key).unwrap().phase, Phase::Blocked { reason } if reason.contains("already exists")));
         assert!(!s.get(&key).unwrap().created_branch);
     }
 
@@ -478,7 +478,7 @@ mod tests {
         let mut restarted = before;
         create(&ctx, &mut restarted, &key).unwrap();
         let rec = restarted.get(&key).unwrap();
-        assert!(matches!(&rec.phase, Phase::Blocked { reason } if reason.contains("já existe")));
+        assert!(matches!(&rec.phase, Phase::Blocked { reason } if reason.contains("already exists")));
         assert!(!rec.created_branch);
         assert!(path.join("notas.txt").exists());
     }
@@ -621,7 +621,7 @@ mod tests {
             std::fs::write(path.join(file), content).unwrap();
             s.get_mut(&key).unwrap().phase = Phase::Removing;
             let note = remove(&ctx, &mut s, &key).unwrap().unwrap();
-            assert!(note.contains("cancelada"), "{file}: {note}");
+            assert!(note.contains("canceled"), "{file}: {note}");
             assert!(matches!(s.get(&key).unwrap().ownership, Ownership::Adopted { .. }));
             assert_eq!(std::fs::read_to_string(path.join(file)).unwrap(), content);
             assert!(branch_exists(&fx, BRANCH));
@@ -641,10 +641,10 @@ mod tests {
         git(&fx.clone, &["update-ref", "refs/heads/feat/x", &main]);
         s.get_mut(&key).unwrap().phase = Phase::Removing;
         let note = remove(&ctx, &mut s, &key).unwrap().unwrap();
-        assert!(note.contains("preservada"));
+        assert!(note.contains("kept"));
         assert!(branch_exists(&fx, BRANCH));
         assert!(s.get(&key).is_none());
-        assert!(s.alerts.iter().any(|a| a.message.contains("preservada")));
+        assert!(s.alerts.iter().any(|a| a.message.contains("kept")));
     }
 
     #[test]
@@ -660,7 +660,7 @@ mod tests {
         git(&fx.clone, &["worktree", "add", "-q", other.to_str().unwrap(), BRANCH]);
         s.get_mut(&key).unwrap().phase = Phase::Removing;
         let note = remove(&ctx, &mut s, &key).unwrap().unwrap();
-        assert!(note.contains("outro worktree"));
+        assert!(note.contains("another worktree"));
         assert!(branch_exists(&fx, BRANCH));
     }
 
@@ -728,7 +728,7 @@ mod tests {
 
         git(&path, &["push", "-q", "origin", "stack/minha"]);
         let msg = release(&ctx, &mut s, &key).unwrap();
-        assert!(msg.contains("liberado"));
+        assert!(msg.contains("released"));
         assert!(!path.exists());
         assert!(s.get(&key).is_none());
         assert!(branch_exists(&fx, "stack/minha"), "branch empilhada é do usuário");
@@ -748,7 +748,7 @@ mod tests {
         git(&fx.remote, &["update-ref", "-d", "refs/heads/feat/x"]); // squash merge + delete branch
         adopt(&mut s, &key);
         let msg = release(&ctx, &mut s, &key).unwrap();
-        assert!(msg.contains("liberado"), "{msg}");
+        assert!(msg.contains("released"), "{msg}");
         assert!(!path.exists());
         assert!(s.get(&key).is_none());
     }

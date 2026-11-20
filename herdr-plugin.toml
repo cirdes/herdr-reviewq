@@ -29,6 +29,12 @@ contexts = ["pane", "workspace"]
 command = ["bin/herdr-reviewq", "request", "sync"]
 
 [[actions]]
+id = "release-all"
+title = "reviewq: release all adopted"
+contexts = ["pane", "workspace"]
+command = ["bin/herdr-reviewq", "request", "release-all"]
+
+[[actions]]
 id = "first-ready"
 title = "reviewq: first ready PR"
 contexts = ["pane", "workspace"]

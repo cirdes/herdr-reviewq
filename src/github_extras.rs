@@ -41,7 +41,7 @@ pub fn fetch_review_ci(
         let data = match gh_json(runner, cmd, deadline).and_then(|o| graphql_data(&o)) {
             Ok(d) => d,
             Err(e) => {
-                crate::applog::info(&format!("CI de {repo}: lote falhou: {}", e.message));
+                crate::applog::info(&format!("CI for {repo}: batch failed: {}", e.message));
                 continue;
             }
         };
@@ -73,12 +73,12 @@ pub struct MyPrsResult {
 
 fn parse_my_pr(node: &Value, now: DateTime<Utc>) -> Result<MyPr, FetchError> {
     if node.get("__typename").and_then(Value::as_str) != Some("PullRequest") {
-        return Err(other("resultado da busca não é um PR"));
+        return Err(other("search result is not a PR"));
     }
     let raw = str_at(node, "/createdAt")?;
-    let created_at = DateTime::parse_from_rfc3339(&raw).map_err(|e| other(format!("createdAt inválido {raw}: {e}")))?.with_timezone(&Utc);
+    let created_at = DateTime::parse_from_rfc3339(&raw).map_err(|e| other(format!("invalid createdAt {raw}: {e}")))?.with_timezone(&Utc);
     Ok(MyPr {
-        number: node.get("number").and_then(Value::as_u64).ok_or_else(|| other("PR sem number"))?,
+        number: node.get("number").and_then(Value::as_u64).ok_or_else(|| other("PR without number"))?,
         title: str_at(node, "/title")?,
         url: str_at(node, "/url")?,
         draft: bool_at(node, "/isDraft")?,
@@ -100,7 +100,7 @@ fn search_all(
     cancel: &dyn Fn() -> bool,
     mut each: impl FnMut(&Value) -> Result<(), FetchError>,
 ) -> Result<Value, FetchError> {
-    let (owner, name) = repo.split_once('/').ok_or_else(|| other(format!("repo inválido {repo}")))?;
+    let (owner, name) = repo.split_once('/').ok_or_else(|| other(format!("invalid repo {repo}")))?;
     let mut seen_cursors = BTreeSet::new();
     let mut cursor: Option<String> = None;
     for _ in 0..MAX_PAGES {
@@ -118,12 +118,12 @@ fn search_all(
         let data = graphql_data(&gh_json(runner, cmd, deadline)?)?;
         let repository = match data.get("repository") {
             Some(r) if !r.is_null() => r.clone(),
-            _ => return Err(other("sem acesso ao repositório")),
+            _ => return Err(other("no access to the repository")),
         };
-        let search = data.get("search").ok_or_else(|| other("resposta sem search"))?;
-        let total = search.get("issueCount").and_then(Value::as_u64).ok_or_else(|| other("search sem issueCount"))?;
+        let search = data.get("search").ok_or_else(|| other("response without search"))?;
+        let total = search.get("issueCount").and_then(Value::as_u64).ok_or_else(|| other("search without issueCount"))?;
         if total > SEARCH_CEILING {
-            return Err(other(format!("busca acima do teto do GitHub ({total} PRs)")));
+            return Err(other(format!("search above the GitHub cap ({total} PRs)")));
         }
         for node in arr_at(search, "/nodes")? {
             each(node)?;
@@ -133,13 +133,13 @@ fn search_all(
             true => {
                 let c = str_at(search, "/pageInfo/endCursor")?;
                 if !seen_cursors.insert(c.clone()) {
-                    return Err(other("cursor repetido na paginação"));
+                    return Err(other("repeated cursor in pagination"));
                 }
                 cursor = Some(c);
             }
         }
     }
-    Err(other("paginação excedeu o limite"))
+    Err(other("pagination exceeded the limit"))
 }
 
 /// PRs abertos de `viewer` no repo e quantos ele criou desde `since`. Tudo ou nada: qualquer falha
@@ -170,7 +170,7 @@ pub fn fetch_my_prs(
     let cq = format!("repo:{repo} is:pr author:{viewer} created:>={}", since.to_rfc3339_opts(SecondsFormat::Secs, true));
     let cmd = Cmd::new("gh").args(["api", "graphql", "-f"]).arg(format!("query={MY_PRS_COUNT_QUERY}")).arg("-f").arg(format!("q={cq}"));
     let data = graphql_data(&gh_json(runner, cmd, deadline)?)?;
-    let opened_24h = data.pointer("/search/issueCount").and_then(Value::as_u64).ok_or_else(|| other("contador sem issueCount"))?;
+    let opened_24h = data.pointer("/search/issueCount").and_then(Value::as_u64).ok_or_else(|| other("counter without issueCount"))?;
     Ok(MyPrsResult { prs, opened_24h })
 }
 
@@ -197,10 +197,10 @@ pub fn fetch_open_prs(
     let mut seen = BTreeSet::new();
     let repository = search_all(runner, repo, OPEN_PRS_QUERY, &q, deadline, cancel, |node| {
         if node.get("__typename").and_then(Value::as_str) != Some("PullRequest") {
-            return Err(other("resultado da busca não é um PR"));
+            return Err(other("search result is not a PR"));
         }
         let pr = OpenPr {
-            number: node.get("number").and_then(Value::as_u64).ok_or_else(|| other("PR sem number"))?,
+            number: node.get("number").and_then(Value::as_u64).ok_or_else(|| other("PR without number"))?,
             head_ref: str_at(node, "/headRefName")?,
             base_ref: str_at(node, "/baseRefName")?,
         };
@@ -339,14 +339,14 @@ mod tests {
         fake.on("after=C1", Output::ok(&page(vec![], Some("C1"), 1)));
         fake.on("is:open", Output::ok(&page(vec![mine_node(1, false)], Some("C1"), 1)));
         let e = fetch_my_prs(&fake, "o/r", "cirdes", since(), now(), far(), &never).unwrap_err();
-        assert!(e.message.contains("cursor repetido"), "{}", e.message);
+        assert!(e.message.contains("repeated cursor"), "{}", e.message);
     }
 
     #[test]
     fn my_prs_over_search_ceiling_fails() {
         let fake = FakeRunner::new();
         fake.on("is:open", Output::ok(&page(vec![], None, 1001)));
-        assert!(fetch_my_prs(&fake, "o/r", "cirdes", since(), now(), far(), &never).unwrap_err().message.contains("teto"));
+        assert!(fetch_my_prs(&fake, "o/r", "cirdes", since(), now(), far(), &never).unwrap_err().message.contains("cap"));
     }
 
     #[test]
@@ -355,7 +355,7 @@ mod tests {
         let mut v: Value = serde_json::from_str(&page(vec![], None, 0)).unwrap();
         v["data"]["repository"] = Value::Null;
         fake.on("is:open", Output::ok(&v.to_string()));
-        assert!(fetch_my_prs(&fake, "o/r", "cirdes", since(), now(), far(), &never).unwrap_err().message.contains("sem acesso"));
+        assert!(fetch_my_prs(&fake, "o/r", "cirdes", since(), now(), far(), &never).unwrap_err().message.contains("no access"));
     }
 
     #[test]

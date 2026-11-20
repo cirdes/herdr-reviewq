@@ -41,7 +41,7 @@ pub fn lock(path: &Path, wait: Duration) -> Result<std::fs::File> {
         .write(true)
         .truncate(false)
         .open(path)
-        .with_context(|| format!("não consegui abrir {}", path.display()))?;
+        .with_context(|| format!("could not open {}", path.display()))?;
     let start = Instant::now();
     loop {
         if f.try_lock_exclusive().is_ok() {
@@ -49,7 +49,7 @@ pub fn lock(path: &Path, wait: Duration) -> Result<std::fs::File> {
         }
         let elapsed = start.elapsed();
         if elapsed >= wait {
-            bail!("outro processo está preparando o painel (ui.lock)");
+            bail!("another process is preparing the panel (ui.lock)");
         }
         std::thread::sleep(Duration::from_millis(50).min(wait - elapsed));
     }
@@ -58,7 +58,7 @@ pub fn lock(path: &Path, wait: Duration) -> Result<std::fs::File> {
 fn remaining(deadline: Instant) -> Result<Duration> {
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero() {
-        bail!("prazo para preparar o painel do reviewq esgotado");
+        bail!("timed out preparing the reviewq panel");
     }
     Ok(left)
 }
@@ -83,7 +83,7 @@ fn ensure_inner(
     let previous_focus = all.iter().find(|w| w.focused).map(|w| w.id.clone());
     let mine: Vec<_> = all.into_iter().filter(|w| w.label == UI_LABEL).collect();
     if mine.len() > 1 {
-        bail!("workspaces {UI_LABEL} duplicados no herdr; feche um deles");
+        bail!("duplicate {UI_LABEL} workspaces in herdr; close one of them");
     }
     let (ws, root) = match mine.into_iter().next() {
         Some(w) => (w.id, None),
@@ -95,12 +95,12 @@ fn ensure_inner(
     }
     let target = root
         .or_else(|| panes.first().map(|p| p.id.clone()))
-        .context("workspace do painel sem pane para ancorar")?;
+        .context("panel workspace has no pane to anchor to")?;
     herdr.open_plugin_pane(&ws, &target, deadline)?;
     if restore_focus {
         give_focus_back(herdr, &ws, previous_focus.as_deref(), deadline)?;
     }
-    let dead = "o painel do reviewq não ficou de pé (confira `herdr plugin log` e se o binário instalado tem `tui`)";
+    let dead = "the reviewq panel did not come up (check `herdr plugin log` and whether the installed binary has `tui`)";
     loop {
         if Instant::now() >= deadline {
             bail!(dead);
@@ -166,17 +166,17 @@ pub fn focus_first_ready(herdr: &dyn Herdr, cfg: &Config, read_state: impl Fn() 
 
 /// Foca o workspace de um PR, reabrindo se fechado. Nunca muta estado.
 pub fn focus_pr(herdr: &dyn Herdr, cfg: &Config, state: &State, key: &PrKey) -> Result<()> {
-    let rec = state.get(key).with_context(|| format!("{key} não está mais no painel"))?;
+    let rec = state.get(key).with_context(|| format!("{key} is no longer in the panel"))?;
     if matches!(rec.phase, Phase::Removing | Phase::Creating) {
-        bail!("{key} está sendo criado ou removido");
+        bail!("{key} is being created or removed");
     }
     if !rec.path.exists() {
-        bail!("o worktree de {key} não existe mais");
+        bail!("the worktree of {key} no longer exists");
     }
-    let repo = cfg.repo(&key.repo).with_context(|| format!("repo {} fora da config", key.repo))?;
+    let repo = cfg.repo(&key.repo).with_context(|| format!("repo {} is not in the config", key.repo))?;
     let ws = herdr
         .find_workspace(&repo.path, &rec.path)?
-        .with_context(|| format!("o herdr não encontrou o worktree de {key}"))?;
+        .with_context(|| format!("herdr did not find the worktree of {key}"))?;
     herdr.focus_workspace(&ws, Instant::now() + UI_CALL_TIMEOUT)
 }
 
@@ -274,7 +274,7 @@ mod tests {
         let h2 = fake_with_focus();
         h2.tui_starts_dead.set(true);
         let err = ensure(&h2, &lock_path(&dir), dir.path(), soon(50), Duration::from_millis(50)).unwrap_err().to_string();
-        assert!(err.contains("não ficou de pé"), "{err}");
+        assert!(err.contains("did not come up"), "{err}");
     }
 
     #[test]
@@ -282,7 +282,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let h = fake_with_focus();
         let err = ensure(&h, &lock_path(&dir), dir.path(), Instant::now(), Duration::from_millis(50)).unwrap_err().to_string();
-        assert!(err.contains("prazo"), "{err}");
+        assert!(err.contains("timed out"), "{err}");
         assert_eq!(ui_count(&h), 0);
     }
 
@@ -294,7 +294,7 @@ mod tests {
         h.pane_scan_delay.set(Duration::from_millis(40));
         let start = Instant::now();
         let err = ensure(&h, &lock_path(&dir), dir.path(), soon(150), Duration::from_millis(50)).unwrap_err().to_string();
-        assert!(err.contains("prazo") || err.contains("não ficou de pé"), "{err}");
+        assert!(err.contains("prazo") || err.contains("did not come up"), "{err}");
         assert!(start.elapsed() < Duration::from_millis(260), "ensure estourou o prazo: {:?}", start.elapsed());
     }
 
@@ -372,7 +372,7 @@ mod tests {
             h.workspaces.borrow_mut().push(WorkspaceInfo { id: id.into(), label: UI_LABEL.into(), focused: false });
         }
         let err = ensure(&h, &lock_path(&dir), dir.path(), soon(500), Duration::ZERO).unwrap_err().to_string();
-        assert!(err.contains("duplicados"), "{err}");
+        assert!(err.contains("duplicate"), "{err}");
         assert!(h.opened_on.borrow().is_empty());
     }
 
@@ -420,7 +420,7 @@ mod tests {
 
         let h = fake_with_focus();
         let err = ensure(&h, &path, dir.path(), soon(2000), Duration::from_millis(150)).unwrap_err().to_string();
-        assert!(err.contains("outro processo"), "{err}");
+        assert!(err.contains("another process"), "{err}");
         assert_eq!(ui_count(&h), 0, "sem o lock, nada é criado");
 
         release_tx.send(()).unwrap();
@@ -523,22 +523,22 @@ mod tests {
         let c = cfg(dir.path());
         let mut s = State::default();
         let key = crate::state::PrKey::new("o/r", 7);
-        assert!(focus_pr(&h, &c, &s, &key).unwrap_err().to_string().contains("não está mais"));
+        assert!(focus_pr(&h, &c, &s, &key).unwrap_err().to_string().contains("no longer"));
 
         let mut rec = PrRecord::fixture("o/r", 7, "x", "s");
         rec.path = dir.path().to_path_buf();
         rec.phase = Phase::Removing;
         s.insert(rec.clone());
-        assert!(focus_pr(&h, &c, &s, &key).unwrap_err().to_string().contains("removido"));
+        assert!(focus_pr(&h, &c, &s, &key).unwrap_err().to_string().contains("removed"));
 
         rec.phase = Phase::Ready;
         rec.path = dir.path().join("sumiu");
         s.insert(rec.clone());
-        assert!(focus_pr(&h, &c, &s, &key).unwrap_err().to_string().contains("não existe mais"));
+        assert!(focus_pr(&h, &c, &s, &key).unwrap_err().to_string().contains("no longer exists"));
 
         rec.path = dir.path().to_path_buf();
         s.insert(rec);
-        assert!(focus_pr(&h, &c, &s, &key).unwrap_err().to_string().contains("não encontrou"));
+        assert!(focus_pr(&h, &c, &s, &key).unwrap_err().to_string().contains("did not find"));
         assert!(h.focused.borrow().is_none());
     }
 }

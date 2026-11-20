@@ -9,6 +9,21 @@ pub enum RequestKind {
     Retry,
     Release,
     Adopt,
+    /// Releases every adopted worktree at once.
+    ReleaseAll,
+}
+
+impl RequestKind {
+    /// Same name as the serialized form (`release_all`), for logs and request results.
+    pub fn name(self) -> &'static str {
+        match self {
+            RequestKind::Sync => "sync",
+            RequestKind::Retry => "retry",
+            RequestKind::Release => "release",
+            RequestKind::Adopt => "adopt",
+            RequestKind::ReleaseAll => "release_all",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

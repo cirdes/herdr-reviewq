@@ -4,12 +4,12 @@ use chrono::{DateTime, Duration, Utc};
 
 pub fn phase_label(p: &Phase) -> String {
     match p {
-        Phase::Creating => "criando".into(),
-        Phase::Preparing => "preparando".into(),
-        Phase::Ready => "pronto".into(),
-        Phase::Failed { step, .. } => format!("falhou · {step}"),
-        Phase::Removing => "removendo".into(),
-        Phase::Blocked { reason } => format!("bloqueado · {reason}"),
+        Phase::Creating => "creating".into(),
+        Phase::Preparing => "preparing".into(),
+        Phase::Ready => "ready".into(),
+        Phase::Failed { step, .. } => format!("failed · {step}"),
+        Phase::Removing => "removing".into(),
+        Phase::Blocked { reason } => format!("blocked · {reason}"),
     }
 }
 
@@ -22,45 +22,45 @@ pub fn render(state: &State) -> String {
 pub fn render_at(state: &State, now: DateTime<Utc>, remove_grace: Duration, repos: &[String], poll_secs: u64) -> String {
     let mut out = String::new();
     let pending = state.prs.values().filter(|r| r.remote == Remote::Pending).count();
-    out.push_str(&format!("Pendentes: {pending}\n"));
+    out.push_str(&format!("Pending: {pending}\n"));
     let today = match crate::today::valid_success(&state.reviews_today, now, repos, None) {
-        Some(s) => format!("{} (há {})", s.count, crate::today::ago(now - s.as_of)),
+        Some(s) => format!("{} ({} ago)", s.count, crate::today::ago(now - s.as_of)),
         None => "–".to_string(),
     };
-    out.push_str(&format!("Feitas hoje: {today}\n"));
+    out.push_str(&format!("Done today: {today}\n"));
     let mine_repos: Vec<String> = if repos.is_empty() { state.my_prs.repos.keys().cloned().collect() } else { repos.to_vec() };
-    out.push_str(&format!("Abertos 24h: {}\n", crate::today::opened_24h_label(&state.my_prs, &mine_repos, now, poll_secs)));
+    out.push_str(&format!("Opened 24h: {}\n", crate::today::opened_24h_label(&state.my_prs, &mine_repos, now, poll_secs)));
     if let Some(a) = state.reviews_today.last_attempt.as_ref().filter(|a| !a.ok) {
-        out.push_str(&format!("! feitas hoje: {} ({})\n", a.error.as_deref().unwrap_or("erro"), a.failed_repos.join(", ")));
+        out.push_str(&format!("! done today: {} ({})\n", a.error.as_deref().unwrap_or("error"), a.failed_repos.join(", ")));
     }
     for (repo, e) in &state.my_prs.errors {
         if repos.is_empty() || repos.contains(repo) {
-            out.push_str(&format!("! meus PRs · {repo}: {e}\n"));
+            out.push_str(&format!("! my PRs · {repo}: {e}\n"));
         }
     }
     for (repo, st) in &state.repos {
         if !st.ok {
-            out.push_str(&format!("! {repo}: {}\n", st.error.as_deref().unwrap_or("erro")));
+            out.push_str(&format!("! {repo}: {}\n", st.error.as_deref().unwrap_or("error")));
         }
         if !st.forks.is_empty() {
-            out.push_str(&format!("! {repo}: PRs de fork ignorados {:?}\n", st.forks));
+            out.push_str(&format!("! {repo}: fork PRs ignored {:?}\n", st.forks));
         }
     }
     let stacks = crate::stacks::labels(state);
     for r in state.prs.values() {
         let stack = match stacks.get(&r.key).map(String::as_str) {
-            Some(s) if s != crate::stacks::NONE => format!(" · pilha {s}"),
+            Some(s) if s != crate::stacks::NONE => format!(" · stack {s}"),
             _ => String::new(),
         };
         let owner = match &r.ownership {
             Ownership::Managed => String::new(),
-            Ownership::Adopted { reason, .. } => format!(" [adotado: {reason}]"),
+            Ownership::Adopted { reason, .. } => format!(" [adopted: {reason}]"),
         };
         let warn = r.warning.as_deref().map(|w| format!(" ⚠ {w}")).unwrap_or_default();
         let leaving = match (&r.ownership, r.not_pending_since) {
             (Ownership::Managed, Some(since)) if r.phase != Phase::Removing => {
                 let left = (since + remove_grace - now).num_seconds().max(0);
-                format!(" · sai em {}min", (left + 59) / 60)
+                format!(" · leaves in {}min", (left + 59) / 60)
             }
             _ => String::new(),
         };
@@ -69,7 +69,7 @@ pub fn render_at(state: &State, now: DateTime<Utc>, remove_grace: Duration, repo
             c => format!(" · CI {c}"),
         };
         let started = match (r.work_started_at, &r.work_agent) {
-            (Some(t), agent) => format!(" · iniciado {} {}", crate::today::start_label(t, now), agent.as_deref().unwrap_or("agente")),
+            (Some(t), agent) => format!(" · started {} {}", crate::today::start_label(t, now), agent.as_deref().unwrap_or("agent")),
             (None, _) => String::new(),
         };
         out.push_str(&format!("{}  {}  {}  {}{leaving}{ci}{started}{stack}{owner}{warn}\n", r.key, r.author, r.title, phase_label(&r.phase)));
@@ -77,21 +77,21 @@ pub fn render_at(state: &State, now: DateTime<Utc>, remove_grace: Duration, repo
     let mine: Vec<(&String, &crate::state::MyPr)> =
         mine_repos.iter().filter_map(|repo| state.my_prs.repos.get_key_value(repo)).flat_map(|(repo, m)| m.prs.iter().map(move |p| (repo, p))).collect();
     if !mine.is_empty() {
-        out.push_str("Meus PRs\n");
+        out.push_str("My PRs\n");
         for (repo, p) in mine {
             let ci = match crate::ci::cell(p.ci.as_ref(), &p.head_sha, now) {
                 c if c.is_empty() => String::new(),
                 c => format!(" · CI {c}"),
             };
-            let kind = if p.draft { "rascunho" } else { "aberto" };
+            let kind = if p.draft { "draft" } else { "open" };
             out.push_str(&format!("  {repo}#{}  {}  {kind}{ci}\n", p.number, p.title));
         }
     }
     for a in state.alerts.iter().rev().take(5) {
-        out.push_str(&format!("alerta {}: {}\n", a.at.format("%d/%m %H:%M"), a.message));
+        out.push_str(&format!("alert {}: {}\n", a.at.format("%b %d %H:%M"), a.message));
     }
     for q in state.last_requests.iter().rev().take(3) {
-        out.push_str(&format!("pedido {} {}: {}\n", q.kind, if q.ok { "ok" } else { "falhou" }, q.message));
+        out.push_str(&format!("request {} {}: {}\n", q.kind, if q.ok { "ok" } else { "failed" }, q.message));
     }
     out
 }
@@ -111,9 +111,9 @@ mod tests {
         s.insert(adopted);
         s.push_alert("state.json corrompido".into());
         let out = render(&s);
-        assert!(out.starts_with("Pendentes: 1\n"));
-        assert!(out.contains("o/r#1  ana  PR 1  pronto"));
-        assert!(out.contains("[adotado: arquivos novos: x]"));
+        assert!(out.starts_with("Pending: 1\n"));
+        assert!(out.contains("o/r#1  ana  PR 1  ready"));
+        assert!(out.contains("[adopted: arquivos novos: x]"));
         assert!(out.contains("state.json corrompido"));
     }
 
@@ -126,9 +126,9 @@ mod tests {
         s.insert(top);
         s.insert(PrRecord::fixture("o/r", 3, "feat/c", "s"));
         let out = render(&s);
-        assert!(out.contains("o/r#1  ana  PR 1  pronto · pilha #1 1/2"), "{out}");
-        assert!(out.contains("o/r#2  ana  PR 2  pronto · pilha #1 2/2"), "{out}");
-        assert!(out.contains("o/r#3  ana  PR 3  pronto\n"), "{out}");
+        assert!(out.contains("o/r#1  ana  PR 1  ready · stack #1 1/2"), "{out}");
+        assert!(out.contains("o/r#2  ana  PR 2  ready · stack #1 2/2"), "{out}");
+        assert!(out.contains("o/r#3  ana  PR 3  ready\n"), "{out}");
     }
 
     #[test]
@@ -140,7 +140,7 @@ mod tests {
         rec.not_pending_since = Some(now - Duration::minutes(5));
         s.insert(rec);
         let out = render_at(&s, now, Duration::minutes(15), &[], 60);
-        assert!(out.contains("o/r#3  ana  PR 3  pronto · sai em 10min"), "{out}");
+        assert!(out.contains("o/r#3  ana  PR 3  ready · leaves in 10min"), "{out}");
     }
 
     #[test]
@@ -148,7 +148,7 @@ mod tests {
         let now = chrono::Utc::now();
         let repos = vec!["o/r".to_string()];
         let mut s = State::default();
-        assert!(render_at(&s, now, Duration::minutes(15), &repos, 60).contains("Feitas hoje: –"));
+        assert!(render_at(&s, now, Duration::minutes(15), &repos, 60).contains("Done today: –"));
         s.reviews_today.last_success = Some(crate::state::ReviewsTodaySuccess {
             day: crate::today::local_day(now),
             count: 4,
@@ -157,10 +157,10 @@ mod tests {
             viewer: "c".into(),
             repos: repos.clone(),
         });
-        assert!(render_at(&s, now, Duration::minutes(15), &repos, 60).contains("Feitas hoje: 4 (há 2min)"));
+        assert!(render_at(&s, now, Duration::minutes(15), &repos, 60).contains("Done today: 4 (2min ago)"));
         // troca de repos (ou config ilegível): a contagem antiga não vale
-        assert!(render_at(&s, now, Duration::minutes(15), &["x/y".to_string()], 60).contains("Feitas hoje: –"));
-        assert!(render_at(&s, now, Duration::minutes(15), &[], 60).contains("Feitas hoje: –"));
+        assert!(render_at(&s, now, Duration::minutes(15), &["x/y".to_string()], 60).contains("Done today: –"));
+        assert!(render_at(&s, now, Duration::minutes(15), &[], 60).contains("Done today: –"));
     }
 
     #[test]
@@ -180,8 +180,8 @@ mod tests {
         s.insert(rec);
         s.insert(PrRecord::fixture("o/r", 2, "b", "s"));
         let out = render_at(&s, now, Duration::minutes(15), &[], 60);
-        assert!(out.contains("o/r#1  ana  PR 1  pronto · CI ✗ rspec · iniciado 11:32 claude"), "{out}");
-        assert!(out.contains("o/r#2  ana  PR 2  pronto\n"), "{out}");
+        assert!(out.contains("o/r#1  ana  PR 1  ready · CI ✗ rspec · started 11:32 claude"), "{out}");
+        assert!(out.contains("o/r#2  ana  PR 2  ready\n"), "{out}");
     }
 
     #[test]
@@ -200,7 +200,7 @@ mod tests {
         let now: DateTime<Utc> = "2026-10-13T15:00:00Z".parse().unwrap();
         let repos = vec!["o/r".to_string(), "o/x".to_string()];
         let mut s = State::default();
-        assert!(render_at(&s, now, Duration::minutes(15), &repos, 60).contains("Abertos 24h: –\n"));
+        assert!(render_at(&s, now, Duration::minutes(15), &repos, 60).contains("Opened 24h: –\n"));
         s.my_prs.repos.insert(
             "o/r".into(),
             crate::state::MyPrsRepo {
@@ -219,8 +219,8 @@ mod tests {
         );
         s.my_prs.errors.insert("o/x".into(), "boom".into());
         let out = render_at(&s, now, Duration::minutes(15), &repos, 60);
-        assert!(out.contains("Feitas hoje: –\nAbertos 24h: 2?\n"), "{out}");
-        assert!(out.contains("! meus PRs · o/x: boom"), "{out}");
-        assert!(out.contains("Meus PRs\n  o/r#9  Meu  rascunho\n"), "{out}");
+        assert!(out.contains("Done today: –\nOpened 24h: 2?\n"), "{out}");
+        assert!(out.contains("! my PRs · o/x: boom"), "{out}");
+        assert!(out.contains("My PRs\n  o/r#9  Meu  draft\n"), "{out}");
     }
 }

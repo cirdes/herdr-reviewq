@@ -10,8 +10,8 @@ pub fn local_day(at: DateTime<Utc>) -> NaiveDate {
 /// histórica), usa o primeiro instante válido do dia.
 pub fn day_start_utc(day: NaiveDate) -> DateTime<Utc> {
     (0..24)
-        .find_map(|h| Sao_Paulo.from_local_datetime(&day.and_hms_opt(h, 0, 0).expect("hora válida")).earliest())
-        .expect("todo dia tem um instante válido")
+        .find_map(|h| Sao_Paulo.from_local_datetime(&day.and_hms_opt(h, 0, 0).expect("valid hour")).earliest())
+        .expect("every day has a valid instant")
         .with_timezone(&Utc)
 }
 
@@ -54,11 +54,11 @@ pub fn start_label(t: DateTime<Utc>, now: DateTime<Utc>) -> String {
     if local_day(t) == local_day(now) {
         local_hm(t)
     } else {
-        t.with_timezone(&Sao_Paulo).format("%d/%m").to_string()
+        t.with_timezone(&Sao_Paulo).format("%b %d").to_string()
     }
 }
 
-/// Contador "Abertos 24h": soma dos repos do config. `–` sem nenhum resultado; `N?` se algum repo
+/// Contador "Opened 24h": soma dos repos do config. `–` sem nenhum resultado; `N?` se algum repo
 /// está sem resultado, com erro na última tentativa ou mais velho que 3 polls.
 pub fn opened_24h_label(my: &crate::state::MyPrs, repos: &[String], now: DateTime<Utc>, poll_secs: u64) -> String {
     let limit = chrono::Duration::seconds(3 * poll_secs as i64);

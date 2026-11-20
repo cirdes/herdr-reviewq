@@ -8,7 +8,7 @@ use crate::state::{PrKey, Remote, State};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Rótulo de quem está fora de pilha.
-pub const NONE: &str = "Não";
+pub const NONE: &str = "No";
 
 struct Node {
     number: u64,

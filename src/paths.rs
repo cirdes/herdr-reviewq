@@ -18,7 +18,7 @@ impl Paths {
     }
 
     pub fn from_env() -> Result<Self> {
-        let home = std::env::var_os("HOME").context("HOME não definido")?;
+        let home = std::env::var_os("HOME").context("HOME is not set")?;
         Ok(Self::from_home(PathBuf::from(home)))
     }
 

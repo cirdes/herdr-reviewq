@@ -109,6 +109,8 @@ pub struct View {
     pub empty_reason: Option<String>,
     /// Com filtro ativo: (linhas que casam, total de linhas sem filtro).
     pub filtered: Option<(usize, usize)>,
+    /// Adopted review PRs, counted before the filter: what `X` (release all) would release.
+    pub adopted: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +128,8 @@ pub struct UiState {
     pub order: Vec<RowId>,
     /// Confirmação pendente (tecla `y`/`n`).
     pub confirm: Option<(RequestKind, PrKey)>,
+    /// Pending confirmation of "release all adopted" (`X`); independent of `confirm`.
+    pub confirm_all: bool,
     pub sent: Vec<Sent>,
     /// Resultados e avisos; independente de `confirm`.
     pub message: Option<String>,
@@ -176,8 +180,8 @@ impl View {
                 pending: "–".into(),
                 today: "–".into(),
                 opened_24h: "–".into(),
-                empty_reason: Some("sem snapshot ainda — o daemon não gravou o estado".into()),
-                header: Header { sync: "nunca".into(), stale: true, errors: vec![] },
+                empty_reason: Some("no snapshot yet — the daemon has not written the state".into()),
+                header: Header { sync: "never".into(), stale: true, errors: vec![] },
                 ..Default::default()
             };
         };
@@ -231,7 +235,7 @@ impl View {
         let rows: Vec<(Section, u8, i64, Row)> = scored.into_iter().map(|(_, t)| t).collect();
         let filtered = (!terms.is_empty()).then_some((rows.len(), total));
         let empty_reason = match filtered {
-            Some((0, _)) => Some(format!("nenhum PR casa com \"{}\" (esc limpa a busca)", ui.filter.trim())),
+            Some((0, _)) => Some(format!("no PR matches \"{}\" (esc clears the search)", ui.filter.trim())),
             _ => None,
         };
 
@@ -249,6 +253,7 @@ impl View {
             request_line: request_line(state, ui, now),
             empty_reason,
             filtered,
+            adopted: state.prs.values().filter(|r| r.ownership != Ownership::Managed).count(),
         }
     }
 }
@@ -280,14 +285,14 @@ fn label(key: &PrKey, cfg: &ViewConfig) -> String {
 fn mine_row(repo: &str, p: &crate::state::MyPr, stack: String, branch: &str, cfg: &ViewConfig, now: DateTime<Utc>) -> Row {
     let key = PrKey::new(repo, p.number);
     Row {
-        search: haystack(&key, "você", &p.title, branch),
+        search: haystack(&key, "you", &p.title, branch),
         label: label(&key, cfg),
         id: RowId::Mine(key),
         section: Section::Mine,
-        author: "você".into(),
+        author: "you".into(),
         title: p.title.clone(),
         icon: crate::ci::icon(p.ci.as_ref()),
-        status: if p.draft { "rascunho" } else { "aberto" }.into(),
+        status: if p.draft { "draft" } else { "open" }.into(),
         ci: crate::ci::cell(p.ci.as_ref(), &p.head_sha, now),
         started: NO_START.into(),
         stack,
@@ -383,24 +388,24 @@ fn row_of(r: &PrRecord, section: Section, stack: String, state: &State, cfg: &Vi
     let managed = r.ownership == Ownership::Managed;
     let status = match (&r.ownership, section) {
         (Ownership::Adopted { reason, .. }, _) => {
-            let still = if r.remote == Remote::Pending { " · ainda pendente" } else { "" };
-            format!("seu · {reason}{still}")
+            let still = if r.remote == Remote::Pending { " · still pending" } else { "" };
+            format!("yours · {reason}{still}")
         }
         (_, Section::NoSync) => {
             let since = state
                 .repos
                 .get(&r.key.repo)
                 .and_then(|s| s.since)
-                .map(|t| format!(" desde {}", local_hm(t)))
+                .map(|t| format!(" since {}", local_hm(t)))
                 .unwrap_or_default();
-            let paused = if r.not_pending_since.is_some() { "carência pausada: sem sync · " } else { "" };
-            format!("{} · {paused}GitHub sem sync{since}", phase_label(&r.phase))
+            let paused = if r.not_pending_since.is_some() { "grace paused: no sync · " } else { "" };
+            format!("{} · {paused}GitHub not synced{since}", phase_label(&r.phase))
         }
-        (_, Section::Leaving) if r.phase == Phase::Removing => "removendo".into(),
+        (_, Section::Leaving) if r.phase == Phase::Removing => "removing".into(),
         (_, Section::Leaving) => {
             let left = r.not_pending_since.map(|t| cfg.remove_grace - (now - t)).unwrap_or_else(chrono::Duration::zero);
             let mins = (left.num_seconds().max(0) + 59) / 60;
-            format!("{} · sai em {mins}min", phase_label(&r.phase))
+            format!("{} · leaves in {mins}min", phase_label(&r.phase))
         }
         _ => phase_label(&r.phase),
     };
@@ -431,10 +436,10 @@ fn row_of(r: &PrRecord, section: Section, stack: String, state: &State, cfg: &Vi
 fn today_detail(state: &State, valid_as_of: Option<DateTime<Utc>>, now: DateTime<Utc>) -> String {
     let mut parts = vec![];
     if let Some(as_of) = valid_as_of {
-        parts.push(format!("atualizado há {}", ago(now - as_of)));
+        parts.push(format!("updated {} ago", ago(now - as_of)));
     }
     if let Some(a) = state.reviews_today.last_attempt.as_ref().filter(|a| !a.ok) {
-        parts.push(format!("erro: {} ({})", a.error.as_deref().unwrap_or("?"), a.failed_repos.join(", ")));
+        parts.push(format!("error: {} ({})", a.error.as_deref().unwrap_or("?"), a.failed_repos.join(", ")));
     }
     parts.join(" · ")
 }
@@ -451,27 +456,27 @@ fn header(state: &State, cfg: &ViewConfig, now: DateTime<Utc>) -> Header {
                     None => never = true,
                 }
                 if !st.ok {
-                    let since = st.since.map(|t| format!(" desde {}", local_hm(t))).unwrap_or_default();
-                    errors.push(format!("{name}: {}{since}", st.error.as_deref().unwrap_or("erro")));
+                    let since = st.since.map(|t| format!(" since {}", local_hm(t))).unwrap_or_default();
+                    errors.push(format!("{name}: {}{since}", st.error.as_deref().unwrap_or("error")));
                 }
             }
             None => {
                 never = true;
-                errors.push(format!("{name}: ainda não sincronizado"));
+                errors.push(format!("{name}: not synced yet"));
             }
         }
     }
     for name in &cfg.repos {
         if let Some(e) = state.my_prs.errors.get(name) {
-            errors.push(format!("meus PRs · {name}: {e}"));
+            errors.push(format!("my PRs · {name}: {e}"));
         }
     }
     let limit = chrono::Duration::seconds(3 * cfg.poll_interval_secs as i64);
     match (never, worst) {
-        (true, _) | (false, None) => Header { sync: "sync nunca · atrasado".into(), stale: true, errors },
+        (true, _) | (false, None) => Header { sync: "sync never · late".into(), stale: true, errors },
         (false, Some(w)) => {
             let stale = w > limit;
-            let late = if stale { " · atrasado" } else { "" };
+            let late = if stale { " · late" } else { "" };
             Header { sync: format!("sync {}{late}", ago(w)), stale, errors }
         }
     }
@@ -483,26 +488,27 @@ const NO_REPLY_SECS: i64 = 150;
 fn request_line(state: &State, ui: &UiState, now: DateTime<Utc>) -> Option<String> {
     let sent = ui.sent.last()?;
     let what = match &sent.pr {
-        Some(k) => format!("pedido {} {k}", kind_label(sent.kind)),
-        None => format!("pedido {}", kind_label(sent.kind)),
+        Some(k) => format!("request {} {k}", kind_label(sent.kind)),
+        None => format!("request {}", kind_label(sent.kind)),
     };
     if let Some(res) = state.last_requests.iter().find(|r| r.id == sent.id) {
-        let verdict = if res.ok { "ok" } else { "falhou" };
+        let verdict = if res.ok { "ok" } else { "failed" };
         return Some(format!("{what}: {verdict} — {}", res.message));
     }
     if now - sent.at > chrono::Duration::seconds(NO_REPLY_SECS) {
-        Some(format!("{what}: sem resposta do daemon"))
+        Some(format!("{what}: no reply from the daemon"))
     } else {
-        Some(format!("{what}: enviado…"))
+        Some(format!("{what}: sent…"))
     }
 }
 
 pub fn kind_label(k: RequestKind) -> &'static str {
     match k {
         RequestKind::Sync => "sync",
-        RequestKind::Retry => "tentar de novo",
-        RequestKind::Release => "liberar",
-        RequestKind::Adopt => "adotar",
+        RequestKind::Retry => "retry",
+        RequestKind::Release => "release",
+        RequestKind::Adopt => "adopt",
+        RequestKind::ReleaseAll => "release all",
     }
 }
 
@@ -564,9 +570,9 @@ mod tests {
         assert_eq!(order, vec![
             (2, Section::Pending), (3, Section::Pending), (1, Section::Pending),
             (5, Section::Adopted), (6, Section::NoSync), (8, Section::NoSync), (4, Section::Leaving), (7, Section::Leaving)]);
-        assert!(v.row(&rid(4)).unwrap().status.contains("sai em 12min"));
+        assert!(v.row(&rid(4)).unwrap().status.contains("leaves in 12min"));
         let paused = &v.row(&rid(8)).unwrap().status;
-        assert!(paused.contains("carência pausada: sem sync") && paused.contains("GitHub sem sync desde"), "{paused}");
+        assert!(paused.contains("grace paused: no sync") && paused.contains("GitHub not synced since"), "{paused}");
         // remote = pending: 1, 2, 3, 5 (adotado) e 7 (removing com remote pending)
         assert_eq!(v.pending, "5");
     }
@@ -588,18 +594,18 @@ mod tests {
         let mut s = state_with(vec![], now);
         s.repos.get_mut("o/r").unwrap().last_sync = Some(now - chrono::Duration::minutes(10));
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
-        assert!(v.header.sync.contains("10min") && v.header.stale && v.header.sync.contains("atrasado"));
+        assert!(v.header.sync.contains("10min") && v.header.stale && v.header.sync.contains("late"));
         let c = ViewConfig { repos: vec!["o/r".into(), "o/novo".into()], ..cfg() };
         let v = build(Some(&s), &UiState::default(), &c, now);
-        assert!(v.header.sync.contains("nunca"));
-        assert!(v.header.errors.iter().any(|e| e.contains("o/novo") && e.contains("ainda não sincronizado")));
+        assert!(v.header.sync.contains("never"));
+        assert!(v.header.errors.iter().any(|e| e.contains("o/novo") && e.contains("not synced yet")));
     }
 
     #[test]
     fn no_snapshot_is_not_zero() {
         let v = build(None, &UiState::default(), &cfg(), Utc::now());
         assert_eq!(v.pending, "–");
-        assert!(v.empty_reason.as_deref().unwrap().contains("sem snapshot"));
+        assert!(v.empty_reason.as_deref().unwrap().contains("no snapshot"));
     }
 
     #[test]
@@ -665,15 +671,15 @@ mod tests {
         let mut s = state_with(vec![], now);
         let ui = UiState { sent: vec![Sent { id: "a1".into(), kind: RequestKind::Release, pr: Some(PrKey::new("o/r", 5)), at: now - chrono::Duration::seconds(5) }], ..Default::default() };
         let l = build(Some(&s), &ui, &cfg(), now).request_line.unwrap();
-        assert!(l.contains("enviado") && l.contains("o/r#5"), "{l}");
+        assert!(l.contains("sent") && l.contains("o/r#5"), "{l}");
         // um tick ocupado chega a ~105 s (contador 90 s + ensure 15 s): ainda não é "sem resposta"
         let busy = now + chrono::Duration::seconds(120);
-        assert!(!build(Some(&s), &ui, &cfg(), busy).request_line.unwrap().contains("sem resposta do daemon"));
+        assert!(!build(Some(&s), &ui, &cfg(), busy).request_line.unwrap().contains("no reply from the daemon"));
         let late = now + chrono::Duration::seconds(160);
-        assert!(build(Some(&s), &ui, &cfg(), late).request_line.unwrap().contains("sem resposta do daemon"));
+        assert!(build(Some(&s), &ui, &cfg(), late).request_line.unwrap().contains("no reply from the daemon"));
         s.push_request_result(RequestResult { id: "a1".into(), kind: "release".into(), pr: Some("o/r#5".into()), ok: false, message: "há alterações locais".into(), at: now });
         let line = build(Some(&s), &ui, &cfg(), now).request_line.unwrap();
-        assert!(line.contains("falhou") && line.contains("alterações locais"));
+        assert!(line.contains("failed") && line.contains("alterações locais"));
     }
 
     #[test]
@@ -696,7 +702,7 @@ mod tests {
         with_mine(&mut s, vec![mine(2, false, "2026-10-13T10:00:00Z")], now, 1);
         // sem coleta: a fila sozinha não vê o PR 2 e o meu PR fica sem dado
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
-        assert_eq!(v.row(&rid(1)).unwrap().stack, "Não");
+        assert_eq!(v.row(&rid(1)).unwrap().stack, "No");
         assert_eq!(v.row(&mid(2)).unwrap().stack, "");
         // com a coleta, o meu PR 2 está em cima do 1
         s.open_prs.repos.insert(
@@ -794,7 +800,7 @@ mod tests {
         let row = v.row(&rid(4)).unwrap();
         assert_eq!(row.section, Section::Leaving);
         assert_eq!(row.started, "11:32"); // São Paulo
-        assert!(row.status.contains("sai em 12min"));
+        assert!(row.status.contains("leaves in 12min"));
     }
 
     #[test]
@@ -827,10 +833,10 @@ mod tests {
         with_mine(&mut s, vec![mine(9, true, "2026-10-13T10:00:00Z"), mine(8, false, "2026-10-13T09:00:00Z")], now, 2);
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
         let r9 = v.row(&mid(9)).unwrap();
-        assert_eq!((r9.status.as_str(), r9.author.as_str(), r9.started.as_str(), r9.stack.as_str()), ("rascunho", "você", "–", ""));
+        assert_eq!((r9.status.as_str(), r9.author.as_str(), r9.started.as_str(), r9.stack.as_str()), ("draft", "you", "–", ""));
         assert_eq!(r9.icon, '·');
         assert_eq!(r9.url, "https://github.com/o/r/pull/9");
-        assert_eq!(v.row(&mid(8)).unwrap().status, "aberto");
+        assert_eq!(v.row(&mid(8)).unwrap().status, "open");
     }
 
     #[test]
@@ -857,7 +863,7 @@ mod tests {
         let s = state_with(vec![started(1, "2026-10-13T14:32:00Z"), started(2, "2026-10-12T14:32:00Z"), rec(3, Phase::Ready)], now);
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
         assert_eq!(v.row(&rid(1)).unwrap().started, "11:32");
-        assert_eq!(v.row(&rid(2)).unwrap().started, "12/10");
+        assert_eq!(v.row(&rid(2)).unwrap().started, "Oct 12");
         assert_eq!(v.row(&rid(3)).unwrap().started, "–");
     }
 
@@ -885,7 +891,7 @@ mod tests {
         s.my_prs.errors.insert("o/r".into(), "boom".into());
         s.my_prs.errors.insert("x/y".into(), "fora da config".into());
         let v = build(Some(&s), &UiState::default(), &cfg(), now);
-        assert!(v.header.errors.contains(&"meus PRs · o/r: boom".to_string()), "{:?}", v.header.errors);
+        assert!(v.header.errors.contains(&"my PRs · o/r: boom".to_string()), "{:?}", v.header.errors);
         assert!(!v.header.errors.iter().any(|e| e.contains("x/y")));
     }
 
@@ -985,7 +991,7 @@ mod tests {
     #[test]
     fn filter_finds_my_pr_by_branch_from_open_prs() {
         assert_eq!(ids_for("eng-7000").0, vec![mid(9)]);
-        assert_eq!(ids_for("você").0, vec![mid(9)]);
+        assert_eq!(ids_for("you").0, vec![mid(9)]);
     }
 
     #[test]

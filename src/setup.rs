@@ -169,7 +169,7 @@ impl SetupJob {
             .truncate(true)
             .mode(0o600)
             .open(log_path)
-            .context("não consegui criar o log do setup")?;
+            .context("could not create the setup log")?;
         f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         Ok(Self {
             key,
@@ -219,10 +219,10 @@ impl SetupJob {
                         let step = run.step.clone();
                         self.current = None;
                         if !st.success() {
-                            let code = st.code().map_or("sinal".to_string(), |c| c.to_string());
+                            let code = st.code().map_or("signal".to_string(), |c| c.to_string());
                             return JobStatus::Failed {
                                 step,
-                                reason: format!("saiu com {code}; veja {}", self.log_path.display()),
+                                reason: format!("exited with {code}; see {}", self.log_path.display()),
                             };
                         }
                     }
@@ -256,7 +256,7 @@ impl SetupJob {
             .stderr(Stdio::piped())
             .process_group(0)
             .spawn()
-            .with_context(|| format!("falha ao iniciar: {}", redact(step)))?;
+            .with_context(|| format!("failed to start: {}", redact(step)))?;
         copy_redacted(child.stdout.take().expect("stdout piped"), OpenOptions::new().append(true).open(&self.log_path)?);
         copy_redacted(child.stderr.take().expect("stderr piped"), OpenOptions::new().append(true).open(&self.log_path)?);
         self.current = Some(Running { step: redact(step), child, started: Instant::now() });
@@ -345,12 +345,12 @@ mod tests {
             }
             other => panic!("esperava falha, veio {other:?}"),
         }
-        assert!(!dir.path().join("nunca").exists());
+        assert!(!dir.path().join("never").exists());
         assert!(log(&dir).contains("segredo-na-saida"));
         let again = j.poll();
         assert!(matches!(&again, JobStatus::Failed { step, .. } if step == "echo segredo-na-saida; exit 3"));
         std::thread::sleep(Duration::from_millis(100));
-        assert!(!dir.path().join("nunca").exists());
+        assert!(!dir.path().join("never").exists());
     }
 
     #[test]
