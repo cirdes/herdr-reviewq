@@ -68,7 +68,7 @@ const NO_START: &str = "–";
 #[derive(Debug, Clone)]
 pub struct Row {
     pub id: RowId,
-    /// "#n" com um repo configurado; "repo#n" com mais de um.
+    /// "#n" com um repo configurado; "repo#n" (sem owner, salvo nome ambíguo) com mais de um.
     pub label: String,
     pub section: Section,
     pub author: String,
@@ -265,8 +265,16 @@ fn section_of(r: &PrRecord) -> Section {
     }
 }
 
+/// "#n" com um repo configurado. Com mais de um, "repo#n" sem o owner (todos os repos costumam
+/// ser da mesma org, e o owner sozinho enchia a coluna); se dois repos configurados têm o mesmo
+/// nome curto, volta para "owner/repo#n".
 fn label(key: &PrKey, cfg: &ViewConfig) -> String {
-    if cfg.repos.len() > 1 { key.to_string() } else { format!("#{}", key.number) }
+    if cfg.repos.len() <= 1 {
+        return format!("#{}", key.number);
+    }
+    let short = |r: &str| r.rsplit('/').next().unwrap_or(r).to_string();
+    let name = short(&key.repo);
+    if cfg.repos.iter().filter(|r| short(r) == name).count() > 1 { key.to_string() } else { format!("{name}#{}", key.number) }
 }
 
 fn mine_row(repo: &str, p: &crate::state::MyPr, stack: String, branch: &str, cfg: &ViewConfig, now: DateTime<Utc>) -> Row {
@@ -646,7 +654,9 @@ mod tests {
         let s = state_with(vec![rec(1, Phase::Ready)], now);
         assert_eq!(build(Some(&s), &UiState::default(), &cfg(), now).rows[0].label, "#1");
         let c = ViewConfig { repos: vec!["o/r".into(), "o/x".into()], ..cfg() };
-        assert_eq!(build(Some(&s), &UiState::default(), &c, now).rows[0].label, "o/r#1");
+        assert_eq!(build(Some(&s), &UiState::default(), &c, now).rows[0].label, "r#1");
+        let c = ViewConfig { repos: vec!["o/r".into(), "p/r".into()], ..cfg() };
+        assert_eq!(build(Some(&s), &UiState::default(), &c, now).rows[0].label, "o/r#1", "nome curto ambíguo");
     }
 
     #[test]
