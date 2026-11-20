@@ -238,13 +238,32 @@ pub fn release(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<String> {
         crate::applog::info(&format!("{key}: {e:#}; checking against origin branches only"));
     }
     let f = facts::collect(ctx.runner, &rec.path, &repo.disposable_ignored)?;
+    // Commits fora do origin num PR já fechado: ficam só no backup ref, avisado na mensagem.
+    let mut unpushed_note = None;
     if f.exists {
         if let Some(dirt) = f.dirt() {
-            bail!("{key} cannot be released: {dirt}. Commit and push, or discard, and try again");
+            let only_ignored = !f.op_in_progress && f.tracked.is_empty() && f.flagged.is_empty() && f.untracked.is_empty();
+            let hint = if only_ignored { " (if the setup generates them, add them to disposable_ignored in the config)" } else { "" };
+            bail!("{key} cannot be released: {dirt}. Commit and push, or discard, and try again{hint}");
         }
         if let Some(head) = &f.head {
             if !git.is_reachable_from_origin(&repo.path, head)? {
-                bail!("{key} cannot be released: HEAD {} has commits that are not on origin", &head[..head.len().min(8)]);
+                let short = &head[..head.len().min(8)];
+                // Depois de merge ou fechamento o trabalho local quase sempre já entrou por outro
+                // caminho (squash, rebase, outro PR); com o PR aberto ele ainda pode ser pushado.
+                match crate::github_extras::fetch_pr_state(ctx.runner, &key.repo, key.number) {
+                    Ok(state) if state != "OPEN" => {
+                        unpushed_note = Some(format!(
+                            "PR {}: commits of HEAD {short} that are not on origin are kept in refs/reviewq/backup/pr-{} for 14 days",
+                            state.to_lowercase(),
+                            key.number
+                        ));
+                    }
+                    Ok(_) => bail!("{key} cannot be released: HEAD {short} has commits that are not on origin and the PR is still open"),
+                    Err(e) => bail!(
+                        "{key} cannot be released: HEAD {short} has commits that are not on origin (could not check whether the PR is closed: {e:#})"
+                    ),
+                }
             }
         }
     }
@@ -265,6 +284,10 @@ pub fn release(ctx: &Ctx, state: &mut State, key: &PrKey) -> Result<String> {
     }
     state.remove(key);
     let mut msg = format!("{key} released");
+    if let Some(n) = &unpushed_note {
+        state.push_alert(format!("{key}: {n}"));
+        msg.push_str(&format!("; {n}"));
+    }
     if let Some(n) = note {
         state.push_alert(format!("{key}: {n}"));
         msg.push_str(&format!("; {n}"));
@@ -687,6 +710,26 @@ mod tests {
         }
     }
 
+    /// `gh` no FakeRunner (sem regra = falha) e git de verdade.
+    struct GhOnFake {
+        gh: crate::runner::FakeRunner,
+    }
+
+    impl GhOnFake {
+        fn new() -> Self {
+            Self { gh: crate::runner::FakeRunner::new() }
+        }
+        fn pr_state(&self, state: &str) {
+            self.gh.on("gh pr view 7 --repo o/r", crate::runner::Output::ok(&format!("{state}\n")));
+        }
+    }
+
+    impl crate::runner::Runner for GhOnFake {
+        fn run(&self, c: &crate::runner::Cmd) -> Result<crate::runner::Output> {
+            if c.program == "gh" { self.gh.run(c) } else { RealRunner.run(c) }
+        }
+    }
+
     #[test]
     fn remove_never_reopens_a_closed_workspace() {
         use crate::runner::{FakeRunner, Output};
@@ -716,14 +759,16 @@ mod tests {
         let fx = fixture(BRANCH);
         let cfg = config(&fx, "true");
         let herdr = FakeHerdr::new();
-        let ctx = Ctx { cfg: &cfg, runner: &RealRunner, herdr: &herdr, now: Utc::now() };
+        let runner = GhOnFake::new();
+        let ctx = Ctx { cfg: &cfg, runner: &runner, herdr: &herdr, now: Utc::now() };
         let (mut s, key) = creating(&fx, &cfg);
         let path = ready(&ctx, &mut s, &key);
         git(&path, &["checkout", "-q", "-b", "stack/minha"]);
         git(&path, &["commit", "-q", "--allow-empty", "-m", "empilhado"]);
         adopt(&mut s, &key);
+        runner.pr_state("OPEN");
         let err = release(&ctx, &mut s, &key).unwrap_err().to_string();
-        assert!(err.contains("origin"), "{err}");
+        assert!(err.contains("origin") && err.contains("still open"), "{err}");
         assert!(path.exists());
 
         git(&path, &["push", "-q", "origin", "stack/minha"]);
@@ -758,13 +803,14 @@ mod tests {
         let fx = fixture(BRANCH);
         let cfg = config(&fx, "true");
         let herdr = FakeHerdr::new();
-        let ctx = Ctx { cfg: &cfg, runner: &RealRunner, herdr: &herdr, now: Utc::now() };
+        let runner = GhOnFake::new();
+        let ctx = Ctx { cfg: &cfg, runner: &runner, herdr: &herdr, now: Utc::now() };
         let (mut s, key) = creating(&fx, &cfg);
         let path = ready(&ctx, &mut s, &key);
         git(&fx.remote, &["update-ref", "-d", "refs/heads/feat/x"]);
         adopt(&mut s, &key);
         let err = release(&ctx, &mut s, &key).unwrap_err().to_string();
-        assert!(err.contains("origin"), "{err}");
+        assert!(err.contains("origin") && err.contains("could not check"), "{err}");
         assert!(path.exists());
     }
 
@@ -773,7 +819,8 @@ mod tests {
         let fx = fixture(BRANCH);
         let cfg = config(&fx, "true");
         let herdr = FakeHerdr::new();
-        let ctx = Ctx { cfg: &cfg, runner: &RealRunner, herdr: &herdr, now: Utc::now() };
+        let runner = GhOnFake::new();
+        let ctx = Ctx { cfg: &cfg, runner: &runner, herdr: &herdr, now: Utc::now() };
         let (mut s, key) = creating(&fx, &cfg);
         let path = ready(&ctx, &mut s, &key);
         git(&path, &["checkout", "-q", "-b", "stack/minha"]);
@@ -781,6 +828,7 @@ mod tests {
         let local = git(&path, &["rev-parse", "HEAD"]);
         git(&fx.clone, &["update-ref", "refs/remotes/backup/velha", &local]);
         adopt(&mut s, &key);
+        runner.pr_state("OPEN");
         assert!(release(&ctx, &mut s, &key).is_err());
         assert!(path.exists());
     }
@@ -801,6 +849,30 @@ mod tests {
     }
 
     #[test]
+    fn release_of_closed_pr_keeps_unpushed_commits_only_in_backup() {
+        for pr_state in ["MERGED", "CLOSED"] {
+            let fx = fixture(BRANCH);
+            let cfg = config(&fx, "true");
+            let herdr = FakeHerdr::new();
+            let runner = GhOnFake::new();
+            let ctx = Ctx { cfg: &cfg, runner: &runner, herdr: &herdr, now: Utc::now() };
+            let (mut s, key) = creating(&fx, &cfg);
+            let path = ready(&ctx, &mut s, &key);
+            git(&path, &["commit", "-q", "--allow-empty", "-m", "rebase local"]);
+            let local = git(&path, &["rev-parse", "HEAD"]);
+            adopt(&mut s, &key);
+            runner.pr_state(pr_state);
+            let msg = release(&ctx, &mut s, &key).unwrap();
+            assert!(msg.contains("released") && msg.contains("refs/reviewq/backup/pr-7"), "{msg}");
+            assert!(!path.exists());
+            assert!(s.get(&key).is_none());
+            let backups = git(&fx.clone, &["for-each-ref", "--points-at", &local, "--format=%(refname)", "refs/reviewq/backup/pr-7/"]);
+            assert!(!backups.trim().is_empty(), "local commit must stay in a backup ref");
+            assert!(s.alerts.iter().any(|a| a.message.contains("refs/reviewq/backup/pr-7")), "{:?}", s.alerts);
+        }
+    }
+
+    #[test]
     fn release_refuses_ignored_env_file() {
         let fx = fixture(BRANCH);
         let cfg = config(&fx, "true");
@@ -810,7 +882,8 @@ mod tests {
         let path = ready(&ctx, &mut s, &key);
         std::fs::write(path.join(".env"), "SEGREDO=1").unwrap();
         adopt(&mut s, &key);
-        assert!(release(&ctx, &mut s, &key).is_err());
+        let err = release(&ctx, &mut s, &key).unwrap_err().to_string();
+        assert!(err.contains(".env") && err.contains("disposable_ignored"), "{err}");
         assert!(path.join(".env").exists());
     }
 

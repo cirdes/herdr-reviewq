@@ -213,6 +213,24 @@ pub fn fetch_open_prs(
     Ok((prs, default_branch))
 }
 
+/// Estado do PR no GitHub: `OPEN`, `CLOSED` ou `MERGED`.
+pub fn fetch_pr_state(runner: &dyn Runner, repo: &str, number: u64) -> anyhow::Result<String> {
+    let cmd = Cmd::new("gh")
+        .args(["pr", "view", &number.to_string(), "--repo", repo, "--json", "state", "--jq", ".state"])
+        .timeout(std::time::Duration::from_secs(60));
+    let out = runner.run(&cmd)?;
+    if out.timed_out {
+        anyhow::bail!("gh timed out");
+    }
+    if !out.success() {
+        anyhow::bail!("gh pr view failed: {}", out.stderr.trim());
+    }
+    match out.stdout.trim() {
+        s @ ("OPEN" | "CLOSED" | "MERGED") => Ok(s.to_string()),
+        s => anyhow::bail!("unexpected PR state from gh: {s:?}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
