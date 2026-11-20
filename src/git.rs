@@ -35,7 +35,7 @@ impl<'a> Git<'a> {
     pub fn ok(&self, dir: &Path, args: &[&str]) -> Result<String> {
         let out = self.raw(dir, args, 120)?;
         if !out.success() {
-            bail!("git {} falhou: {}", args.join(" "), out.stderr.trim());
+            bail!("git {} failed: {}", args.join(" "), out.stderr.trim());
         }
         Ok(out.stdout.trim_end().to_string())
     }
@@ -45,7 +45,7 @@ impl<'a> Git<'a> {
         let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
         let out = self.raw(repo, &["fetch", "--no-tags", "origin", &refspec], 600)?;
         if !out.success() {
-            bail!("git fetch {branch} falhou: {}", out.stderr.trim());
+            bail!("git fetch {branch} failed: {}", out.stderr.trim());
         }
         self.ok(repo, &["rev-parse", &format!("refs/remotes/origin/{branch}")])
     }
@@ -70,7 +70,7 @@ impl<'a> Git<'a> {
     pub fn fetch_origin(&self, repo: &Path) -> Result<()> {
         let out = self.raw(repo, &["fetch", "--no-tags", "--prune", "origin"], 600)?;
         if !out.success() {
-            bail!("git fetch origin falhou: {}", out.stderr.trim());
+            bail!("git fetch origin failed: {}", out.stderr.trim());
         }
         Ok(())
     }
@@ -80,7 +80,7 @@ impl<'a> Git<'a> {
         let refspec = format!("+refs/pull/{number}/head:refs/remotes/origin/pr/{number}");
         let out = self.raw(repo, &["fetch", "--no-tags", "origin", &refspec], 600)?;
         if !out.success() {
-            bail!("git fetch pull/{number}/head falhou: {}", out.stderr.trim());
+            bail!("git fetch pull/{number}/head failed: {}", out.stderr.trim());
         }
         Ok(())
     }

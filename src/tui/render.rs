@@ -1,4 +1,4 @@
-use crate::tui::keys::confirm_text;
+use crate::tui::keys::{confirm_text, release_all_text};
 use crate::tui::model::{Section, UiState, View};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -10,18 +10,18 @@ use unicode_width::UnicodeWidthStr;
 
 pub const MIN_W: u16 = 60;
 pub const MIN_H: u16 = 12;
-const FOOTER: &str = "↑↓ mover · / buscar · enter abrir · o GitHub · l log · s sync · R tentar de novo · a adotar · r liberar · q sair";
+const FOOTER: &str = "/ search · enter open · o GitHub · l log · s sync · R retry · a adopt · r release · X release all · q quit";
 const MAX_CONFIRM_LINES: u16 = 4;
 const BOTTOM_H: u16 = 5;
 
 fn section_title(s: Section) -> &'static str {
     match s {
-        Section::Started => "Iniciados",
-        Section::Pending => "Pendentes",
-        Section::NoSync => "Sem sync",
-        Section::Leaving => "Saindo",
-        Section::Adopted => "Adotados",
-        Section::Mine => "Meus PRs",
+        Section::Started => "Started",
+        Section::Pending => "Pending",
+        Section::NoSync => "No sync",
+        Section::Leaving => "Leaving",
+        Section::Adopted => "Adopted",
+        Section::Mine => "My PRs",
     }
 }
 
@@ -51,12 +51,16 @@ fn wrapped_lines(text: &str, width: u16) -> u16 {
 pub fn draw(f: &mut Frame, view: &View, ui: &UiState) {
     let area = f.area();
     if area.width < MIN_W || area.height < MIN_H {
-        f.render_widget(Paragraph::new("aumente o pane para ver o reviewq"), area);
+        f.render_widget(Paragraph::new("enlarge the pane to see reviewq"), area);
         return;
     }
 
     // A confirmação tem prioridade sobre qualquer mensagem e nunca é cortada.
-    let confirm = ui.confirm.as_ref().map(|(kind, key)| confirm_text(*kind, key));
+    let confirm = if ui.confirm_all {
+        Some(release_all_text(view.adopted))
+    } else {
+        ui.confirm.as_ref().map(|(kind, key)| confirm_text(*kind, key))
+    };
     let footer_h = match &confirm {
         Some(t) => wrapped_lines(t, area.width.saturating_sub(1)).min(MAX_CONFIRM_LINES),
         None => 1,
@@ -82,17 +86,17 @@ pub fn draw(f: &mut Frame, view: &View, ui: &UiState) {
             head_spans.push(Span::styled(format!("   {}", fit(m, room).trim_end()), Style::new().fg(Color::Yellow)));
         }
     } else if let Some((shown, total)) = view.filtered {
-        let suffix = format!("\": {shown} de {total} · esc limpa · / edita");
-        let room = (head.width as usize).saturating_sub(head_used + cells("   busca \"") + cells(&suffix));
-        head_spans.push(Span::styled(format!("   busca \"{}{suffix}", tail_fit(ui.filter.trim(), room)), Style::new().fg(Color::Cyan)));
+        let suffix = format!("\": {shown} of {total} · esc clears · / edits");
+        let room = (head.width as usize).saturating_sub(head_used + cells("   search \"") + cells(&suffix));
+        head_spans.push(Span::styled(format!("   search \"{}{suffix}", tail_fit(ui.filter.trim(), room)), Style::new().fg(Color::Cyan)));
     }
     f.render_widget(Paragraph::new(Line::from(head_spans)), head);
 
     let [c1, c2, c3, c4] =
         Layout::horizontal([Constraint::Length(14), Constraint::Length(16), Constraint::Length(16), Constraint::Min(0)]).areas(counters);
-    f.render_widget(Paragraph::new(format!(" {}", view.pending)).block(Block::default().borders(Borders::ALL).title("Pendentes")), c1);
-    f.render_widget(Paragraph::new(format!(" {}", view.today)).block(Block::default().borders(Borders::ALL).title("Feitas hoje")), c2);
-    f.render_widget(Paragraph::new(format!(" {}", view.opened_24h)).block(Block::default().borders(Borders::ALL).title("Abertos 24h")), c3);
+    f.render_widget(Paragraph::new(format!(" {}", view.pending)).block(Block::default().borders(Borders::ALL).title("Pending")), c1);
+    f.render_widget(Paragraph::new(format!(" {}", view.today)).block(Block::default().borders(Borders::ALL).title("Done today")), c2);
+    f.render_widget(Paragraph::new(format!(" {}", view.opened_24h)).block(Block::default().borders(Borders::ALL).title("Opened 24h")), c3);
     f.render_widget(Paragraph::new(view.today_detail.clone()), Rect { y: c4.y + 1, height: 1, ..c4 });
 
     draw_list(f, list, view, ui);
@@ -106,8 +110,8 @@ pub fn draw(f: &mut Frame, view: &View, ui: &UiState) {
             footer,
         ),
         None if ui.typing => {
-            let count = view.filtered.map(|(shown, total)| format!("  ({shown} de {total})")).unwrap_or_default();
-            let hint = "  · enter mantém · esc limpa";
+            let count = view.filtered.map(|(shown, total)| format!("  ({shown} of {total})")).unwrap_or_default();
+            let hint = "  · enter keeps · esc clears";
             let room = (footer.width as usize).saturating_sub(3 + cells(&count) + cells(hint));
             let text = format!(" /{}▏{count}{hint}", tail_fit(&ui.filter, room));
             f.render_widget(Paragraph::new(Span::styled(text, Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD))), footer);
@@ -124,7 +128,7 @@ fn draw_bottom(f: &mut Frame, area: Rect, view: &View) {
     let [info, request] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let mut lines: Vec<Line> = view.header.errors.iter().map(|e| Line::styled(format!(" ! {e}"), Style::new().fg(Color::Red))).collect();
     if !view.alerts.is_empty() {
-        lines.push(Line::styled(" Alertas", Style::new().add_modifier(Modifier::BOLD)));
+        lines.push(Line::styled(" Alerts", Style::new().add_modifier(Modifier::BOLD)));
         lines.extend(view.alerts.iter().map(|a| Line::raw(format!("  {a}"))));
     }
     if let Some(e) = &view.empty_reason {
@@ -196,7 +200,7 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
     // espaço some o Empilhado e depois o autor).
     const CI_W: usize = 10;
     const START_W: usize = 6;
-    const STACK_HEAD: &str = "Empilhado";
+    const STACK_HEAD: &str = "Stacked";
     let label_w = view.rows.iter().map(|r| cells(&r.label)).max().unwrap_or(0).clamp(4, 22);
     let prefix = 2 + label_w + 1 + 1 + 1;
     let rest = (area.width as usize).saturating_sub(prefix);
@@ -229,7 +233,7 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
         cells.push(fit(title, title_w).trim_end().to_string());
         cells.join(" ")
     };
-    let head = line(" ", "PR", ' ', "Estado", "CI", "Início", "Autor", STACK_HEAD, "Título");
+    let head = line(" ", "PR", ' ', "State", "CI", "Start", "Author", STACK_HEAD, "Title");
     let mut lines: Vec<Line> = vec![Line::styled(head, Style::new().add_modifier(Modifier::DIM))];
     let mut current: Option<Section> = None;
     let mut selected_line = 0usize;
@@ -307,7 +311,7 @@ mod tests {
     #[test]
     fn draws_counters_sections_and_footer() {
         let out = screen(110, 24, &sample(), &UiState::default());
-        for needle in ["Pendentes", "Feitas hoje", "#15672", "Adotados", "#15726", "trocou para stack/x", "branch feat/x preservada", "enter abrir"] {
+        for needle in ["Pending", "Done today", "#15672", "Adopted", "#15726", "trocou para stack/x", "branch feat/x preservada", "enter open"] {
             assert!(out.contains(needle), "faltou {needle}:\n{out}");
         }
     }
@@ -323,10 +327,10 @@ mod tests {
         };
         for w in [60u16, 110] {
             let out = screen(w, 24, &sample(), &ui);
-            assert!(out.contains("liberar o/r#15726?"), "{w}:\n{out}");
+            assert!(out.contains("release o/r#15726?"), "{w}:\n{out}");
             assert!(out.contains("(y/n)"), "{w}:\n{out}");
             assert!(!out.contains("mensagem comum"), "{w}:\n{out}");
-            assert!(!out.contains("enter abrir"), "{w}:\n{out}");
+            assert!(!out.contains("enter open"), "{w}:\n{out}");
             // todas as palavras do texto estão na tela
             for word in full.split_whitespace() {
                 assert!(out.contains(word), "{w} faltou {word}:\n{out}");
@@ -342,11 +346,11 @@ mod tests {
         s.insert(started);
         s.insert(PrRecord::fixture("o/r", 1, "x", "s"));
         let out = screen(110, 24, &build(&s, &UiState::default()), &UiState::default());
-        for needle in ["Iniciados", " Pendentes", "Estado", "CI", "Início", "Autor", "Título"] {
+        for needle in ["Started", " Pending", "State", "CI", "Start", "Author", "Title"] {
             assert!(out.contains(needle), "faltou {needle}:\n{out}");
         }
-        let iniciados = out.find("Iniciados").unwrap();
-        let pendentes = out.rfind(" Pendentes").unwrap();
+        let iniciados = out.find("Started").unwrap();
+        let pendentes = out.rfind(" Pending").unwrap();
         assert!(iniciados < pendentes, "{out}");
     }
 
@@ -370,7 +374,7 @@ mod tests {
         let mut s = base_state();
         s.my_prs.repos.insert("o/r".into(), crate::state::MyPrsRepo { prs: vec![], opened_24h: 7, as_of: Utc::now() });
         let out = screen(110, 24, &build(&s, &UiState::default()), &UiState::default());
-        assert!(out.contains("Abertos 24h"), "{out}");
+        assert!(out.contains("Opened 24h"), "{out}");
         assert!(out.lines().any(|l| l.contains("│ 7")), "{out}");
     }
 
@@ -394,7 +398,7 @@ mod tests {
             },
         );
         let out = screen(110, 24, &build(&s, &UiState::default()), &UiState::default());
-        for needle in ["Meus PRs", "#77", "rascunho", "você", "Meu PR"] {
+        for needle in ["My PRs", "#77", "draft", "you", "Meu PR"] {
             assert!(out.contains(needle), "faltou {needle}:\n{out}");
         }
     }
@@ -418,7 +422,7 @@ mod tests {
         let view = View::build(Some(&s), &UiState::default(), &cfg(), &UiFacts::default(), now);
         let start = view.rows[0].started.clone();
         let out = screen(60, 20, &view, &UiState::default());
-        assert!(out.contains("pronto · sai em 15min"), "{out}");
+        assert!(out.contains("ready · leaves in 15min"), "{out}");
         assert!(out.contains(&start), "{out}");
         // nome de check que não cabe na coluna: só o ícone, sem corte no meio do nome
         assert!(out.contains("✗ ") && !out.contains("rspec"), "{out}");
@@ -426,7 +430,7 @@ mod tests {
 
     #[test]
     fn tiny_terminal_asks_for_space() {
-        assert!(screen(30, 6, &sample(), &UiState::default()).contains("aumente"));
+        assert!(screen(30, 6, &sample(), &UiState::default()).contains("enlarge"));
     }
 
     #[test]
@@ -438,9 +442,9 @@ mod tests {
         }
         let mut view = build(&s, &UiState::default());
         view.header.errors = vec!["falha na busca do GitHub".into()];
-        view.request_line = Some("pedido sync enviado".into());
+        view.request_line = Some("request sync sent".into());
         let out = screen(110, 24, &view, &UiState::default());
-        assert!(out.contains("pedido sync enviado"), "{out}");
+        assert!(out.contains("request sync sent"), "{out}");
         assert!(out.contains("falha na busca"), "{out}");
         assert!(out.contains("+2"), "esperava marcador +2:\n{out}");
     }
@@ -473,8 +477,18 @@ mod tests {
         let view = failed_view();
         let icon = view.rows[0].icon;
         let out = screen(60, 14, &view, &UiState::default());
-        assert!(out.contains("falhou"), "{out}");
+        assert!(out.contains("failed"), "{out}");
         assert!(out.contains(icon), "{out}");
+    }
+
+    #[test]
+    fn release_all_confirmation_replaces_footer() {
+        let ui = UiState { confirm_all: true, ..Default::default() };
+        for w in [60u16, 110] {
+            let out = screen(w, 24, &sample(), &ui);
+            assert!(out.contains("release the 1 adopted PR?") && out.contains("(y/n)"), "{w}:\n{out}");
+            assert!(!out.contains("enter open"), "{w}:\n{out}");
+        }
     }
 
     #[test]
@@ -482,7 +496,7 @@ mod tests {
         let key = PrKey::new("o/r", 15726);
         let ui = UiState { confirm: Some((RequestKind::Release, key)), ..Default::default() };
         let out = screen(60, 12, &sample(), &ui);
-        assert!(out.contains("(y/n)") && out.contains("liberar o/r#15726?"), "{out}");
+        assert!(out.contains("(y/n)") && out.contains("release o/r#15726?"), "{out}");
     }
 
     #[test]
@@ -490,9 +504,9 @@ mod tests {
         let mut view = sample();
         view.header.errors = vec!["falha na busca".into()];
         view.alerts = vec!["a1".into(), "a2".into(), "a3".into()];
-        view.request_line = Some("pedido sync enviado".into());
+        view.request_line = Some("request sync sent".into());
         let out = screen(60, 12, &view, &UiState::default());
-        assert!(out.contains("pedido sync enviado"), "{out}");
+        assert!(out.contains("request sync sent"), "{out}");
     }
 
     #[test]
@@ -508,16 +522,16 @@ mod tests {
         s.insert(PrRecord::fixture("o/r", 3, "feat/c", "s"));
         let view = build(&s, &UiState::default());
         let out = screen(110, 24, &view, &UiState::default());
-        let head = out.lines().find(|l| l.contains("Título")).unwrap();
+        let head = out.lines().find(|l| l.contains("Title")).unwrap();
         let col = |name: &str| head.find(name).unwrap_or_else(|| panic!("faltou {name}:\n{out}"));
-        assert!(col("Autor") < col("Empilhado") && col("Empilhado") < col("Título"), "{head}");
+        assert!(col("Author") < col("Stacked") && col("Stacked") < col("Title"), "{head}");
         let row = |n: &str| out.lines().find(|l| l.contains(n)).unwrap().to_string();
         assert!(row("#1 ").contains("#1 1/2") && row("#1 ").contains("primeiro"), "{out}");
         assert!(row("#2 ").contains("#1 2/2"), "{out}");
-        assert!(row("#3 ").contains("Não"), "{out}");
+        assert!(row("#3 ").contains("No"), "{out}");
         // sem espaço, a coluna some antes do título
         let narrow = screen(60, 14, &view, &UiState::default());
-        assert!(!narrow.contains("Empilhado") && narrow.contains("primeiro"), "{narrow}");
+        assert!(!narrow.contains("Stacked") && narrow.contains("primeiro"), "{narrow}");
     }
 
     /// Coluna (em células do terminal) onde `needle` começa, na primeira linha que contém `line`.
@@ -550,9 +564,9 @@ mod tests {
         let ui = UiState::default();
         let col = |line: &str, needle: &str| cell_col(110, 24, &view, &ui, line, needle);
         assert_eq!(col("#1 ", "ana"), col("#2 ", "ana"), "autor");
-        assert_eq!(col("#1 ", "Não"), col("#2 ", "Não"), "empilhado");
+        assert_eq!(col("#1 ", "No"), col("#2 ", "No"), "empilhado");
         assert_eq!(col("#1 ", "com emoji"), col("#2 ", "sem emoji"), "título");
-        assert_eq!(col("#1 ", "com emoji"), col("Título", "Título"), "título fora da coluna do cabeçalho");
+        assert_eq!(col("#1 ", "com emoji"), col("Title", "Title"), "título fora da coluna do cabeçalho");
         // CI que não cabe perde o nome e guarda o ícone do check; a que cabe continua inteira
         let out = screen(110, 24, &view, &ui);
         let row1 = out.lines().find(|l| l.contains("#1 ")).unwrap();
@@ -598,21 +612,21 @@ mod tests {
             r.first_seen_at = now - chrono::Duration::minutes(age_min);
             r
         };
-        let mut bottom = pr(4821, "marina", "feat: exporta relatório de fornecedores em CSV", Phase::Ready, 95);
+        let mut bottom = pr(4821, "marina", "feat: export supplier report as CSV", Phase::Ready, 95);
         bottom.head_ref = "feat/export-csv".into();
         s.insert(bottom);
-        let mut top = pr(4830, "marina", "feat: agenda a exportação de fornecedores por e-mail", Phase::Ready, 60);
+        let mut top = pr(4830, "marina", "feat: schedule supplier export by email", Phase::Ready, 60);
         top.head_ref = "feat/export-schedule".into();
         top.base_ref = "feat/export-csv".into();
         s.insert(top);
-        s.insert(pr(4834, "bia", "refactor: extrai cliente HTTP do módulo de cotações", Phase::Preparing, 3));
-        s.insert(pr(4835, "rafa", "test: cobre reprocessamento de webhooks", Phase::Failed { step: "pnpm install".into(), reason: "exit 1".into() }, 8));
-        let mut leaving = pr(4812, "lu", "feat: filtro por categoria no painel", Phase::Ready, 300);
+        s.insert(pr(4834, "bia", "refactor: extract HTTP client from the quotes module", Phase::Preparing, 3));
+        s.insert(pr(4835, "rafa", "test: cover webhook reprocessing", Phase::Failed { step: "pnpm install".into(), reason: "exit 1".into() }, 8));
+        let mut leaving = pr(4812, "lu", "feat: category filter on the dashboard", Phase::Ready, 300);
         leaving.remote = crate::state::Remote::NotPending;
         leaving.not_pending_since = Some(now - chrono::Duration::minutes(3));
         s.insert(leaving);
-        let mut adopted = pr(4799, "voce", "feat: aprovação em lote de cadastros", Phase::Ready, 900);
-        adopted.ownership = Ownership::Adopted { reason: "trocou para stack/lote-2".into(), at: now };
+        let mut adopted = pr(4799, "you", "feat: bulk approval of registrations", Phase::Ready, 900);
+        adopted.ownership = Ownership::Adopted { reason: "switched to stack/bulk-2".into(), at: now };
         s.insert(adopted);
         let ci = |state: crate::ci::CiState, check: Option<&str>, mins: Option<i64>| crate::ci::Ci {
             sha: "s".into(),
@@ -646,8 +660,8 @@ mod tests {
             "acme/app".into(),
             crate::state::MyPrsRepo {
                 prs: vec![
-                    mine(4840, "feat: importa fornecedores por planilha", false, ci(crate::ci::CiState::Pending, None, None), 30),
-                    mine(4827, "chore: atualiza dependências de teste", true, ci(crate::ci::CiState::Success, None, Some(95)), 300),
+                    mine(4840, "feat: import suppliers from a spreadsheet", false, ci(crate::ci::CiState::Pending, None, None), 30),
+                    mine(4827, "chore: update test dependencies", true, ci(crate::ci::CiState::Success, None, Some(95)), 300),
                 ],
                 opened_24h: 2,
                 as_of: now - chrono::Duration::seconds(20),
@@ -656,7 +670,7 @@ mod tests {
         let day = crate::today::local_day(now);
         s.reviews_today.last_success = Some(ReviewsTodaySuccess {
             day, count: 6, per_repo: [("acme/app".to_string(), 6)].into(), as_of: now - chrono::Duration::minutes(2),
-            viewer: "voce".into(), repos: vec!["acme/app".into()],
+            viewer: "you".into(), repos: vec!["acme/app".into()],
         });
         let cfg = ViewConfig { repos: vec!["acme/app".into()], poll_interval_secs: 60, remove_grace: chrono::Duration::minutes(15) };
         let ui = UiState::default();
@@ -747,12 +761,12 @@ mod tests {
         s.insert(PrRecord::fixture("o/r", 2, "outra", "s"));
         let typing = UiState { filter: "4321".into(), typing: true, ..Default::default() };
         let out = screen(110, 24, &build(&s, &typing), &typing);
-        assert!(out.contains("/4321▏  (1 de 2)"), "{out}");
+        assert!(out.contains("/4321▏  (1 of 2)"), "{out}");
         assert!(!out.contains("#2 "), "linha filtrada aparece:\n{out}");
         let kept = UiState { typing: false, ..typing };
         let out = screen(110, 24, &build(&s, &kept), &kept);
-        assert!(out.contains("busca \"4321\": 1 de 2"), "{out}");
-        assert!(out.contains("/ buscar"), "rodapé normal volta:\n{out}");
+        assert!(out.contains("search \"4321\": 1 of 2"), "{out}");
+        assert!(out.contains("/ search"), "rodapé normal volta:\n{out}");
     }
 
     #[test]
@@ -763,7 +777,7 @@ mod tests {
         let ui = UiState { filter, typing: true, ..Default::default() };
         let out = screen(80, 24, &build(&s, &ui), &ui);
         let last = out.lines().last().unwrap();
-        assert!(last.contains("…") && last.contains("fim▏") && last.contains("(0 de 1)") && last.contains("esc limpa"), "{out}");
+        assert!(last.contains("…") && last.contains("fim▏") && last.contains("(0 of 1)") && last.contains("esc clears"), "{out}");
     }
 
     #[test]
@@ -783,6 +797,6 @@ mod tests {
         let ui = UiState { filter: format!("{}fim", "a".repeat(120)), ..Default::default() };
         let out = screen(80, 24, &build(&s, &ui), &ui);
         let top = out.lines().next().unwrap();
-        assert!(top.contains("…") && top.contains("fim\": 0 de 1") && top.contains("/ edita"), "{out}");
+        assert!(top.contains("…") && top.contains("fim\": 0 of 1") && top.contains("/ edits"), "{out}");
     }
 }

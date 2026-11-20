@@ -82,7 +82,7 @@ impl Runner for RealRunner {
         if let Some(dir) = &cmd.cwd {
             command.current_dir(dir);
         }
-        let mut child = command.spawn().with_context(|| format!("falha ao executar {}", cmd.program))?;
+        let mut child = command.spawn().with_context(|| format!("failed to run {}", cmd.program))?;
         let mut out = child.stdout.take().expect("stdout piped");
         let mut err = child.stderr.take().expect("stderr piped");
 

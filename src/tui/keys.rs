@@ -30,27 +30,32 @@ fn eligible(row: &Row, kind: RequestKind) -> bool {
         RequestKind::Retry => row.eligible.retry,
         RequestKind::Adopt => row.eligible.adopt,
         RequestKind::Release => row.eligible.release,
-        RequestKind::Sync => true,
+        RequestKind::Sync | RequestKind::ReleaseAll => true,
     }
 }
 
 fn not_eligible_msg(kind: RequestKind) -> &'static str {
     match kind {
-        RequestKind::Retry => "tentar de novo só vale para setup que falhou ou está bloqueado sem worktree",
-        RequestKind::Adopt => "só dá para adotar um worktree gerenciado pelo daemon",
-        RequestKind::Release => "só dá para liberar um worktree adotado",
-        RequestKind::Sync => "",
+        RequestKind::Retry => "retry only applies to a failed setup or one blocked without a worktree",
+        RequestKind::Adopt => "you can only adopt a worktree managed by the daemon",
+        RequestKind::Release => "you can only release an adopted worktree",
+        RequestKind::Sync | RequestKind::ReleaseAll => "",
     }
 }
 
 pub fn confirm_text(kind: RequestKind, key: &PrKey) -> String {
     match kind {
-        RequestKind::Adopt => format!("adotar {key}? protege da limpeza automática e cancela o setup em andamento (y/n)"),
+        RequestKind::Adopt => format!("adopt {key}? protects it from automatic cleanup and cancels any running setup (y/n)"),
         RequestKind::Release => {
-            format!("liberar {key}? remove o worktree; se o PR ainda estiver pendente, ele só volta com um novo pedido de review (y/n)")
+            format!("release {key}? removes the worktree; if the PR is still pending, it only comes back with a new review request (y/n)")
         }
         other => format!("{} {key}? (y/n)", kind_label(other)),
     }
+}
+
+pub fn release_all_text(n: usize) -> String {
+    let what = if n == 1 { "the 1 adopted PR".to_string() } else { format!("all {n} adopted PRs") };
+    format!("release {what}? removes their worktrees; any with uncommitted or unpushed work is kept (y/n)")
 }
 
 fn move_selection(mut next: UiState, key: Key, index: Option<usize>, view: &View) -> UiState {
@@ -64,6 +69,27 @@ fn move_selection(mut next: UiState, key: Key, index: Option<usize>, view: &View
 pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) {
     let mut next = ui.clone();
 
+    if ui.confirm_all {
+        return match key {
+            Key::Char('y') | Key::Char('Y') => {
+                next.confirm_all = false;
+                if view.adopted > 0 {
+                    (next, Some(Action::Request(RequestKind::ReleaseAll, None)))
+                } else {
+                    next.message = Some("no adopted PRs left; request canceled".into());
+                    (next, None)
+                }
+            }
+            Key::Char('n') | Key::Char('N') | Key::Esc => {
+                next.confirm_all = false;
+                next.message = Some("canceled".into());
+                (next, None)
+            }
+            Key::CtrlC => (next, Some(Action::Quit)),
+            _ => (ui.clone(), None),
+        };
+    }
+
     if let Some((kind, target)) = ui.confirm.clone() {
         return match key {
             Key::Char('y') | Key::Char('Y') => {
@@ -71,14 +97,14 @@ pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) 
                 match view.row(&RowId::Review(target.clone())) {
                     Some(row) if eligible(row, kind) => (next, Some(Action::Request(kind, Some(target)))),
                     _ => {
-                        next.message = Some(format!("{target} mudou de estado; pedido cancelado"));
+                        next.message = Some(format!("{target} changed state; request canceled"));
                         (next, None)
                     }
                 }
             }
             Key::Char('n') | Key::Char('N') | Key::Esc => {
                 next.confirm = None;
-                next.message = Some("cancelado".into());
+                next.message = Some("canceled".into());
                 (next, None)
             }
             Key::CtrlC => (next, Some(Action::Quit)),
@@ -129,13 +155,22 @@ pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) 
         }
         Key::Char('q') | Key::Esc | Key::CtrlC => (next, Some(Action::Quit)),
         Key::Char('s') => (next, Some(Action::Request(RequestKind::Sync, None))),
+        Key::Char('X') => {
+            if view.adopted > 0 {
+                // a confirmação é desenhada a partir de `confirm_all` (release_all_text)
+                next.confirm_all = true;
+            } else {
+                next.message = Some("no adopted PRs to release".into());
+            }
+            (next, None)
+        }
         _ => {
             let Some(row) = selected else { return (next, None) };
             let Some(key_pr) = row.id.review() else {
                 // meus PRs: só abrir no navegador
                 match key {
                     Key::Enter | Key::Char('o') => return (next, Some(Action::OpenUrl(row.id.clone(), row.url.clone()))),
-                    Key::Char('l' | 'R' | 'a' | 'r') => next.message = Some("só para PRs de review".into()),
+                    Key::Char('l' | 'R' | 'a' | 'r') => next.message = Some("only for review PRs".into()),
                     _ => {}
                 }
                 return (next, None);
@@ -143,7 +178,7 @@ pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) 
             match key {
                 Key::Enter if row.eligible.focus => (next, Some(Action::Focus(key_pr.clone()))),
                 Key::Enter => {
-                    next.message = Some("este PR está sendo criado ou removido".into());
+                    next.message = Some("this PR is being created or removed".into());
                     (next, None)
                 }
                 Key::Char('o') => (next, Some(Action::OpenUrl(row.id.clone(), row.url.clone()))),
@@ -227,7 +262,7 @@ mod tests {
             let (ui, a) = handle(Key::Char(k), &mine_at(9), &v);
             assert!(a.is_none(), "{k}");
             assert!(ui.confirm.is_none(), "{k}");
-            assert!(ui.message.as_deref().unwrap_or("").contains("só para PRs de review"), "{k}: {:?}", ui.message);
+            assert!(ui.message.as_deref().unwrap_or("").contains("only for review PRs"), "{k}: {:?}", ui.message);
         }
     }
 
@@ -283,7 +318,7 @@ mod tests {
         let ui = UiState { confirm: Some((RequestKind::Release, PrKey::new("o/r", 5))), ..Default::default() };
         let gone = view(vec![]);
         let (ui2, a) = handle(Key::Char('y'), &ui, &gone);
-        assert!(a.is_none() && ui2.confirm.is_none() && ui2.message.unwrap().contains("cancelado"));
+        assert!(a.is_none() && ui2.confirm.is_none() && ui2.message.unwrap().contains("canceled"));
         let now_managed = view(vec![PrRecord::fixture("o/r", 5, "x", "s")]);
         let (_, a) = handle(Key::Char('y'), &ui, &now_managed);
         assert!(a.is_none());
@@ -294,13 +329,39 @@ mod tests {
     }
 
     #[test]
+    fn release_all_asks_first_and_sends_one_request() {
+        let v = view(vec![adopted(5), adopted(6), PrRecord::fixture("o/r", 1, "x", "s")]);
+        assert_eq!(v.adopted, 2);
+        let (ui, a) = handle(Key::Char('X'), &UiState::default(), &v);
+        assert!(a.is_none() && ui.confirm_all && ui.confirm.is_none());
+        let (ui2, a) = handle(Key::Char('s'), &ui, &v);
+        assert!(a.is_none() && ui2.confirm_all, "other keys are ignored while confirming");
+        let (ui2, a) = handle(Key::Char('n'), &ui, &v);
+        assert!(a.is_none() && !ui2.confirm_all);
+        let (ui2, a) = handle(Key::Char('y'), &ui, &v);
+        assert_eq!(a, Some(Action::Request(RequestKind::ReleaseAll, None)));
+        assert!(!ui2.confirm_all);
+        // os adotados sumiram entre o `X` e o `y`
+        let (ui2, a) = handle(Key::Char('y'), &ui, &view(vec![]));
+        assert!(a.is_none() && ui2.message.unwrap().contains("no adopted"));
+    }
+
+    #[test]
+    fn release_all_without_adopted_only_warns() {
+        let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s")]);
+        let (ui, a) = handle(Key::Char('X'), &UiState::default(), &v);
+        assert!(a.is_none() && !ui.confirm_all && ui.message.unwrap().contains("no adopted"));
+        assert!(release_all_text(1).contains("the 1 adopted PR?") && release_all_text(3).contains("all 3 adopted PRs?"));
+    }
+
+    #[test]
     fn eligibility_is_enforced() {
         let mut failed = PrRecord::fixture("o/r", 2, "x", "s");
         failed.phase = Phase::Failed { step: "a".into(), reason: "b".into() };
         let v = view(vec![PrRecord::fixture("o/r", 1, "x", "s"), failed, adopted(5)]);
         let at = |n| UiState { selected: Some(RowId::Review(PrKey::new("o/r", n))), ..Default::default() };
         let (ui, a) = handle(Key::Char('R'), &at(1), &v);
-        assert!(a.is_none() && ui.message.unwrap().contains("só vale"));
+        assert!(a.is_none() && ui.message.unwrap().contains("only applies"));
         let (_, a) = handle(Key::Char('R'), &at(2), &v);
         assert!(matches!(a, Some(Action::Request(RequestKind::Retry, Some(_)))));
         let (ui, a) = handle(Key::Char('r'), &at(1), &v);

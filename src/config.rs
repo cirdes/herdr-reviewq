@@ -108,7 +108,7 @@ pub fn expand_tilde(path: &Path, home: &Path) -> PathBuf {
 
 impl Config {
     pub fn parse(text: &str, home: &Path) -> Result<Config> {
-        let mut cfg: Config = toml::from_str(text).context("config.toml inválido")?;
+        let mut cfg: Config = toml::from_str(text).context("invalid config.toml")?;
         cfg.worktrees_dir = expand_tilde(&cfg.worktrees_dir, home);
         for repo in &mut cfg.repos {
             repo.path = expand_tilde(&repo.path, home);
@@ -121,13 +121,13 @@ impl Config {
         if !path.exists() {
             // Quem instalou pelo marketplace cai aqui na primeira vez que abre o painel
             bail!(
-                "falta o config: copie {} para {}, edite os [[repos]] e rode `herdr-reviewq service install`",
+                "missing config: copy {} to {}, edit the [[repos]] and run `herdr-reviewq service install`",
                 path.with_file_name("config.example.toml").display(),
                 path.display()
             );
         }
         let text = std::fs::read_to_string(path)
-            .with_context(|| format!("não consegui ler {}", path.display()))?;
+            .with_context(|| format!("could not read {}", path.display()))?;
         Self::parse(&text, home)
     }
 
@@ -141,36 +141,36 @@ impl Config {
 
     fn validate(&self) -> Result<()> {
         if self.repos.is_empty() {
-            bail!("a config precisa de ao menos um [[repos]]");
+            bail!("the config needs at least one [[repos]]");
         }
         for repo in &self.repos {
             let parts: Vec<&str> = repo.name.split('/').collect();
             if parts.len() != 2 || parts.iter().any(|p| p.is_empty()) {
-                bail!("repo inválido: {:?} (use owner/name)", repo.name);
+                bail!("invalid repo: {:?} (use owner/name)", repo.name);
             }
         }
         if !["none", "done", "request"].contains(&self.notify.sound.as_str()) {
-            bail!("notify.sound deve ser none, done ou request");
+            bail!("notify.sound must be none, done or request");
         }
         if self.poll_interval_secs < 15 || self.poll_interval_secs > 3600 {
-            bail!("poll_interval_secs deve estar entre 15 e 3600");
+            bail!("poll_interval_secs must be between 15 and 3600");
         }
         if self.reviews_today_every_secs < 60 || self.reviews_today_every_secs > 86400 {
-            bail!("reviews_today_every_secs deve estar entre 60 e 86400");
+            bail!("reviews_today_every_secs must be between 60 and 86400");
         }
         if self.remove_grace_secs > 604800 {
-            bail!("remove_grace_secs deve estar entre 0 e 604800");
+            bail!("remove_grace_secs must be between 0 and 604800");
         }
         if self.step_timeout_secs < 1 || self.step_timeout_secs > 86400 {
-            bail!("step_timeout_secs deve estar entre 1 e 86400");
+            bail!("step_timeout_secs must be between 1 and 86400");
         }
         if self.window != Window::Auto && self.backend == Backend::Herdr {
-            bail!("window só vale com backend = \"herdr-app\" ou \"auto\"");
+            bail!("window only applies with backend = \"herdr-app\" or \"auto\"");
         }
         let mut seen = std::collections::BTreeSet::new();
         for repo in &self.repos {
             if !seen.insert(repo.name.as_str()) {
-                bail!("repo duplicado na config: {}", repo.name);
+                bail!("duplicate repo in the config: {}", repo.name);
             }
         }
         Ok(())
@@ -291,7 +291,7 @@ sound = "done"
         assert_eq!(cfg.reviews_today_every_secs, 300);
         assert!(Config::parse(&format!("reviews_today_every_secs = 30\n{base}"), Path::new("/h")).is_err());
         let dup = format!("{base}[[repos]]\nname = \"a/b\"\npath = \"/r2\"\nsetup = []\n");
-        assert!(Config::parse(&dup, Path::new("/h")).unwrap_err().to_string().contains("duplicado"));
+        assert!(Config::parse(&dup, Path::new("/h")).unwrap_err().to_string().contains("duplicate"));
     }
 
     #[test]

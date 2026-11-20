@@ -51,10 +51,10 @@ pub fn install_binary(current: &Path, target: &Path) -> Result<()> {
             return Ok(());
         }
     }
-    let dir = target.parent().context("destino sem diretório")?;
+    let dir = target.parent().context("destination has no directory")?;
     std::fs::create_dir_all(dir)?;
     let tmp = target.with_extension("new");
-    std::fs::copy(current, &tmp).with_context(|| format!("falha ao copiar {}", current.display()))?;
+    std::fs::copy(current, &tmp).with_context(|| format!("failed to copy {}", current.display()))?;
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
     std::fs::rename(&tmp, target)?;
     Ok(())
@@ -109,7 +109,7 @@ fn is_loaded() -> bool {
 
 pub fn install(paths: &Paths) -> Result<()> {
     if !paths.config_file.exists() {
-        bail!("crie {} antes (veja config.example.toml)", paths.config_file.display());
+        bail!("create {} first (see config.example.toml)", paths.config_file.display());
     }
     let exe = paths.home.join(".local/bin/herdr-reviewq");
     install_binary(&std::env::current_exe()?, &exe)?;
@@ -120,19 +120,19 @@ pub fn install(paths: &Paths) -> Result<()> {
     let _ = Command::new("launchctl").args(["bootout", &service_target()]).status();
     // o bootout é assíncrono: bootstrap antes de descarregar falha com "Input/output error"
     if !wait_unloaded(is_loaded, Duration::from_secs(10), Duration::from_millis(200)) {
-        println!("nota: o serviço anterior ainda aparece carregado depois de 10s; tentando mesmo assim");
+        println!("note: the previous service still shows as loaded after 10s; trying anyway");
     }
     retry_once(
         || {
             let st = Command::new("launchctl").args(["bootstrap", &domain()]).arg(&target).status()?;
             if !st.success() {
-                bail!("launchctl bootstrap falhou");
+                bail!("launchctl bootstrap failed");
             }
             Ok(())
         },
         Duration::from_secs(1),
     )?;
-    println!("serviço {LABEL} instalado e iniciado com {}", exe.display());
+    println!("service {LABEL} installed and started with {}", exe.display());
     Ok(())
 }
 
@@ -141,14 +141,14 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
     let target = plist_path(paths);
     if target.exists() {
         std::fs::remove_file(&target)?;
-        println!("serviço {LABEL} removido");
+        println!("service {LABEL} removed");
     } else {
-        println!("{} não existe; nada a remover", target.display());
+        println!("{} does not exist; nothing to remove", target.display());
     }
     match bootout {
         Ok(o) if o.status.success() => {}
-        Ok(o) => println!("nota: launchctl bootout falhou (talvez o serviço não estivesse carregado): {}", String::from_utf8_lossy(&o.stderr).trim()),
-        Err(e) => println!("nota: não consegui rodar launchctl bootout: {e}"),
+        Ok(o) => println!("note: launchctl bootout failed (maybe the service was not loaded): {}", String::from_utf8_lossy(&o.stderr).trim()),
+        Err(e) => println!("note: could not run launchctl bootout: {e}"),
     }
     Ok(())
 }
@@ -156,7 +156,7 @@ pub fn uninstall(paths: &Paths) -> Result<()> {
 pub fn restart() -> Result<()> {
     let st = Command::new("launchctl").args(["kickstart", "-k", &format!("{}/{LABEL}", domain())]).status()?;
     if !st.success() {
-        bail!("launchctl kickstart falhou");
+        bail!("launchctl kickstart failed");
     }
     Ok(())
 }
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(m["version"].as_str(), Some(env!("CARGO_PKG_VERSION")));
         assert_eq!(m["panes"][0]["id"].as_str(), Some("tui"));
         let ids: Vec<&str> = m["actions"].as_array().unwrap().iter().map(|a| a["id"].as_str().unwrap()).collect();
-        assert_eq!(ids, vec!["open", "sync-now", "first-ready"]);
+        assert_eq!(ids, vec!["open", "sync-now", "release-all", "first-ready"]);
         let wrapper = include_str!("../bin/herdr-reviewq");
         assert!(wrapper.contains("exec \"$HOME/.local/bin/herdr-reviewq\" \"$@\""));
         // `plugin install` baixa o binário para o mesmo caminho que o wrapper executa

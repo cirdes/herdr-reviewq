@@ -19,7 +19,7 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-arm64)  target="aarch64-apple-darwin" ;;
   Darwin-x86_64) target="x86_64-apple-darwin" ;;
   *)
-    echo "$SAY: só há binário para macOS (arm64 e x86_64); compile com 'cargo build --release'" >&2
+    echo "$SAY: binaries exist only for macOS (arm64 and x86_64); build with 'cargo build --release'" >&2
     exit 1
     ;;
 esac
@@ -42,15 +42,15 @@ dl() {
   return 1
 }
 
-echo "$SAY: baixando $archive ($TAG)"
+echo "$SAY: downloading $archive ($TAG)"
 dl "$base/$archive" "$tmp/$archive"
 dl "$base/$checksum" "$tmp/$checksum"
 
-echo "$SAY: conferindo o checksum"
+echo "$SAY: verifying the checksum"
 expected="$(awk '{print $1}' "$tmp/$checksum")"
 actual="$(shasum -a 256 "$tmp/$archive" | awk '{print $1}')"
 if [ "$expected" != "$actual" ]; then
-  echo "$SAY: checksum não confere (esperado $expected, veio $actual)" >&2
+  echo "$SAY: checksum mismatch (expected $expected, got $actual)" >&2
   exit 1
 fi
 
@@ -77,16 +77,16 @@ install_binary() {
 if [ -f "$plist" ]; then
   # Serviço já instalado: `service install` copia o binário e reinicia o daemon na versão nova.
   if "$new" service install; then
-    echo "$SAY: $TAG instalado em $dest e daemon reiniciado"
+    echo "$SAY: $TAG installed at $dest and daemon restarted"
   else
     install_binary
-    echo "$SAY: $TAG instalado em $dest, mas o daemon não reiniciou; rode: $NAME service install" >&2
+    echo "$SAY: $TAG installed at $dest, but the daemon did not restart; run: $NAME service install" >&2
   fi
-  echo "$SAY: um painel já aberto segue na versão antiga até você fechá-lo e abrir de novo"
+  echo "$SAY: a panel that is already open keeps the old version until you close it and open it again"
 else
   install_binary
-  echo "$SAY: $TAG instalado em $dest"
-  echo "$SAY: falta configurar:"
-  echo "$SAY:   1. cp $config_dir/config.example.toml $config_dir/config.toml e edite os [[repos]]"
+  echo "$SAY: $TAG installed at $dest"
+  echo "$SAY: still to configure:"
+  echo "$SAY:   1. cp $config_dir/config.example.toml $config_dir/config.toml and edit the [[repos]]"
   echo "$SAY:   2. $dest service install"
 fi

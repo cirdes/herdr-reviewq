@@ -1,20 +1,20 @@
 poll_interval_secs = 60
 worktrees_dir      = "~/Workspaces/.reviews"
-# herdr_session    = "default"   # sessão do herdr usada pelo daemon (opcional)
-# backend          = "herdr-app" # "herdr" (terminal) ou "herdr-app" (desktop); padrão "auto": o painel olha o próprio ambiente e o daemon, o que está de pé ao iniciar
-# window           = "remote"    # com herdr-app ou auto: "local" ou "remote" (janela em outra máquina, com o mod reviewq-bridge); padrão "auto": remote sem herdr-app aqui
+# herdr_session    = "default"   # herdr session used by the daemon (optional)
+# backend          = "herdr-app" # "herdr" (terminal) or "herdr-app" (desktop); default "auto": the panel looks at its own environment, the daemon at what is running when it starts
+# window           = "remote"    # with herdr-app or auto: "local" or "remote" (window on another machine, with the reviewq-bridge mod); default "auto": remote when there is no herdr-app here
 step_timeout_secs  = 900
-# espera depois que o PR sai da sua lista (ex.: você aprovou) antes de remover o worktree
+# wait after the PR leaves your queue (e.g. you approved it) before removing the worktree
 remove_grace_secs  = 900
-# cadência do contador "feitas hoje" (mínimo 60)
+# how often the "done today" counter refreshes (minimum 60)
 reviews_today_every_secs = 300
 
 [[repos]]
 name  = "owner/repo"
-path  = "~/Workspaces/repo"   # clone local do repo
+path  = "~/Workspaces/repo"   # local clone of the repo
 setup = ["mise trust", "mise install", "bundle install", "pnpm install"]
-# ignorados que o setup cria e que podem ser apagados junto com o worktree
-# (caminhos relativos à raiz do worktree, como o git os lista)
+# ignored paths the setup creates, which may be deleted along with the worktree
+# (relative to the worktree root, as git lists them)
 disposable_ignored = ["node_modules", "vendor/bundle", "tmp", "log", ".bundle"]
 
 [notify]

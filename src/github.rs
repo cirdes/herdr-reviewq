@@ -99,27 +99,27 @@ pub(crate) fn bool_at(v: &Value, ptr: &str) -> Result<bool, FetchError> {
 }
 
 pub fn parse_page(json: &str, repo: &str) -> Result<Page, FetchError> {
-    let v: Value = serde_json::from_str(json).map_err(|e| other(format!("JSON inválido do gh: {e}")))?;
+    let v: Value = serde_json::from_str(json).map_err(|e| other(format!("invalid JSON from gh: {e}")))?;
     if let Some(errs) = v.get("errors").and_then(Value::as_array) {
         if !errs.is_empty() {
             let msg = errs.iter().filter_map(|e| e.get("message").and_then(Value::as_str)).collect::<Vec<_>>().join("; ");
             return Err(other(format!("GraphQL: {msg}")));
         }
     }
-    let data = v.get("data").filter(|d| !d.is_null()).ok_or_else(|| other("resposta sem data"))?;
+    let data = v.get("data").filter(|d| !d.is_null()).ok_or_else(|| other("response without data"))?;
     let viewer = str_at(data, "/viewer/login")?;
     if data.get("repository").is_none_or(Value::is_null) {
-        return Err(other(format!("sem acesso ao repositório {repo}")));
+        return Err(other(format!("no access to the repository {repo}")));
     }
-    let search = data.get("search").ok_or_else(|| other("resposta sem search"))?;
+    let search = data.get("search").ok_or_else(|| other("response without search"))?;
     let mut prs = Vec::new();
     for node in arr_at(search, "/nodes")? {
         if node.get("__typename").and_then(Value::as_str) != Some("PullRequest") {
-            return Err(other("resultado da busca não é um PR"));
+            return Err(other("search result is not a PR"));
         }
-        let number = node.get("number").and_then(Value::as_u64).ok_or_else(|| other("PR sem number"))?;
+        let number = node.get("number").and_then(Value::as_u64).ok_or_else(|| other("PR without number"))?;
         if bool_at(node, "/reviewRequests/pageInfo/hasNextPage")? {
-            return Err(other(format!("reviewRequests truncado no PR #{number}")));
+            return Err(other(format!("reviewRequests truncated on PR #{number}")));
         }
         let direct = arr_at(node, "/reviewRequests/nodes")?
             .iter()
@@ -131,7 +131,7 @@ pub fn parse_page(json: &str, repo: &str) -> Result<Page, FetchError> {
             }
             let raw = str_at(ev, "/createdAt")?;
             let at = DateTime::parse_from_rfc3339(&raw)
-                .map_err(|e| other(format!("createdAt inválido {raw}: {e}")))?
+                .map_err(|e| other(format!("invalid createdAt {raw}: {e}")))?
                 .with_timezone(&Utc);
             last_request_event_at = last_request_event_at.max(Some(at));
         }
@@ -162,7 +162,7 @@ pub fn parse_page(json: &str, repo: &str) -> Result<Page, FetchError> {
 /// Busca todas as páginas. Qualquer falha vira `Failed`: nunca devolve lista parcial.
 pub fn fetch_pending(runner: &dyn Runner, repo: &str) -> RepoSnapshot {
     let Some((owner, name)) = repo.split_once('/') else {
-        return RepoSnapshot::Failed(other(format!("repo inválido {repo}")));
+        return RepoSnapshot::Failed(other(format!("invalid repo {repo}")));
     };
     let search = format!("repo:{repo} is:pr is:open review-requested:@me");
     let mut all = Vec::new();
@@ -186,7 +186,7 @@ pub fn fetch_pending(runner: &dyn Runner, repo: &str) -> RepoSnapshot {
             Err(e) => return RepoSnapshot::Failed(other(e.to_string())),
         };
         if out.timed_out {
-            return RepoSnapshot::Failed(other("gh excedeu o tempo"));
+            return RepoSnapshot::Failed(other("gh timed out"));
         }
         if !out.success() {
             return RepoSnapshot::Failed(classify(&format!("{} {}", out.stderr, out.stdout)));
@@ -202,7 +202,7 @@ pub fn fetch_pending(runner: &dyn Runner, repo: &str) -> RepoSnapshot {
             Err(e) => return RepoSnapshot::Failed(e),
         }
     }
-    RepoSnapshot::Failed(other("paginação excedeu o limite"))
+    RepoSnapshot::Failed(other("pagination exceeded the limit"))
 }
 
 pub const REVIEWED_QUERY: &str = r#"query($q: String!, $owner: String!, $name: String!, $author: String!, $after: String) {
@@ -263,7 +263,7 @@ pub struct ReviewedPage {
 
 /// Envelope GraphQL compartilhado: rejeita JSON inválido, `errors` não vazio e `data` nulo.
 pub(crate) fn graphql_data(json: &str) -> Result<Value, FetchError> {
-    let mut v: Value = serde_json::from_str(json).map_err(|e| other(format!("JSON inválido do gh: {e}")))?;
+    let mut v: Value = serde_json::from_str(json).map_err(|e| other(format!("invalid JSON from gh: {e}")))?;
     if let Some(errs) = v.get("errors").and_then(Value::as_array) {
         if !errs.is_empty() {
             let msg = errs.iter().filter_map(|e| e.get("message").and_then(Value::as_str)).collect::<Vec<_>>().join("; ");
@@ -272,7 +272,7 @@ pub(crate) fn graphql_data(json: &str) -> Result<Value, FetchError> {
     }
     match v.get_mut("data").map(Value::take) {
         Some(d) if !d.is_null() => Ok(d),
-        _ => Err(other("resposta sem data")),
+        _ => Err(other("response without data")),
     }
 }
 
@@ -281,7 +281,7 @@ pub fn review_counts(state: &str, submitted: Option<DateTime<Utc>>, w: &Window) 
     let counted_state = match state {
         "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "DISMISSED" => true,
         "PENDING" => false,
-        other_state => return Err(other(format!("estado de review desconhecido: {other_state}"))),
+        other_state => return Err(other(format!("unknown review state: {other_state}"))),
     };
     Ok(counted_state && submitted.is_some_and(|t| t >= w.start && t <= w.as_of))
 }
@@ -294,15 +294,15 @@ fn eval_reviews(reviews: &Value, w: &Window) -> Result<(bool, Option<String>), F
     for n in nodes {
         let state = str_at(n, "/state")?;
         let submitted = match n.get("submittedAt") {
-            None => return Err(other("review sem submittedAt")),
+            None => return Err(other("review without submittedAt")),
             Some(Value::Null) if state == "PENDING" => None,
-            Some(Value::Null) => return Err(other(format!("review {state} sem submittedAt"))),
+            Some(Value::Null) => return Err(other(format!("review {state} without submittedAt"))),
             Some(Value::String(raw)) => Some(
                 DateTime::parse_from_rfc3339(raw)
-                    .map_err(|e| other(format!("submittedAt inválido {raw}: {e}")))?
+                    .map_err(|e| other(format!("invalid submittedAt {raw}: {e}")))?
                     .with_timezone(&Utc),
             ),
-            Some(_) => return Err(other("submittedAt de tipo inválido")),
+            Some(_) => return Err(other("submittedAt has an invalid type")),
         };
         if let Some(t) = submitted {
             earliest = Some(earliest.map_or(t, |e: DateTime<Utc>| e.min(t)));
@@ -318,20 +318,20 @@ fn eval_reviews(reviews: &Value, w: &Window) -> Result<(bool, Option<String>), F
 pub fn parse_reviewed_page(json: &str, w: &Window) -> Result<ReviewedPage, FetchError> {
     let data = graphql_data(json)?;
     if data.get("repository").is_none_or(Value::is_null) {
-        return Err(other("sem acesso ao repositório"));
+        return Err(other("no access to the repository"));
     }
-    let search = data.get("search").ok_or_else(|| other("resposta sem search"))?;
-    let count = search.get("issueCount").and_then(Value::as_u64).ok_or_else(|| other("search sem issueCount"))?;
+    let search = data.get("search").ok_or_else(|| other("response without search"))?;
+    let count = search.get("issueCount").and_then(Value::as_u64).ok_or_else(|| other("search without issueCount"))?;
     if count > SEARCH_CEILING {
-        return Err(other(format!("busca acima do teto do GitHub ({count} PRs)")));
+        return Err(other(format!("search above the GitHub cap ({count} PRs)")));
     }
     let mut prs = Vec::new();
     for node in arr_at(search, "/nodes")? {
         if node.get("__typename").and_then(Value::as_str) != Some("PullRequest") {
-            return Err(other("resultado da busca não é um PR"));
+            return Err(other("search result is not a PR"));
         }
-        let number = node.get("number").and_then(Value::as_u64).ok_or_else(|| other("PR sem number"))?;
-        let reviews = node.get("reviews").ok_or_else(|| other(format!("PR #{number} sem reviews")))?;
+        let number = node.get("number").and_then(Value::as_u64).ok_or_else(|| other("PR without number"))?;
+        let reviews = node.get("reviews").ok_or_else(|| other(format!("PR #{number} without reviews")))?;
         let (counted, older_cursor) = eval_reviews(reviews, w)?;
         prs.push(ReviewedPr { number, counted, older_cursor });
     }
@@ -344,14 +344,14 @@ pub fn parse_reviewed_page(json: &str, w: &Window) -> Result<ReviewedPage, Fetch
 pub(crate) fn gh_json(runner: &dyn Runner, cmd: Cmd, deadline: Instant) -> Result<String, FetchError> {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
-        return Err(other("coleta excedeu o orçamento"));
+        return Err(other("collection exceeded the budget"));
     }
     let out = runner.run(&cmd.timeout(GH_TIMEOUT.min(remaining))).map_err(|e| other(e.to_string()))?;
     if Instant::now() >= deadline {
-        return Err(other("coleta excedeu o orçamento"));
+        return Err(other("collection exceeded the budget"));
     }
     if out.timed_out {
-        return Err(other("gh excedeu o tempo"));
+        return Err(other("gh timed out"));
     }
     if !out.success() {
         return Err(classify(&format!("{} {}", out.stderr, out.stdout)));
@@ -375,7 +375,7 @@ fn older_counts(
     deadline: Instant,
     cancel: &dyn Fn() -> bool,
 ) -> Result<bool, FetchError> {
-    let (owner, name) = repo.split_once('/').ok_or_else(|| other(format!("repo inválido {repo}")))?;
+    let (owner, name) = repo.split_once('/').ok_or_else(|| other(format!("invalid repo {repo}")))?;
     let mut seen = std::collections::BTreeSet::from([first.clone()]);
     let mut cursor = first;
     // a página inicial da busca já é a 1ª das MAX_REVIEW_PAGES
@@ -390,20 +390,20 @@ fn older_counts(
             .args(["-F".to_string(), format!("number={number}"), "-f".to_string(), format!("author={viewer}")])
             .args(["-f".to_string(), format!("before={cursor}")]);
         let data = graphql_data(&gh_json(runner, cmd, deadline)?)?;
-        let repository = data.get("repository").filter(|r| !r.is_null()).ok_or_else(|| other("sem acesso ao repositório"))?;
-        let pr = repository.get("pullRequest").filter(|p| !p.is_null()).ok_or_else(|| other(format!("PR #{number} não encontrado")))?;
-        let reviews = pr.get("reviews").ok_or_else(|| other("resposta sem reviews"))?;
+        let repository = data.get("repository").filter(|r| !r.is_null()).ok_or_else(|| other("no access to the repository"))?;
+        let pr = repository.get("pullRequest").filter(|p| !p.is_null()).ok_or_else(|| other(format!("PR #{number} not found")))?;
+        let reviews = pr.get("reviews").ok_or_else(|| other("response without reviews"))?;
         let (counted, next) = eval_reviews(reviews, w)?;
         if counted {
             return Ok(true);
         }
         match next {
-            Some(c) if !seen.insert(c.clone()) => return Err(other(format!("cursor repetido nos reviews de {repo}#{number}"))),
+            Some(c) if !seen.insert(c.clone()) => return Err(other(format!("repeated cursor in the reviews of {repo}#{number}"))),
             Some(c) => cursor = c,
             None => return Ok(false),
         }
     }
-    Err(other(format!("histórico truncado em {repo}#{number}")))
+    Err(other(format!("history truncated at {repo}#{number}")))
 }
 
 /// Número de PRs distintos do repo com review submetido pelo viewer na janela.
@@ -415,7 +415,7 @@ pub fn count_reviews_today(
     deadline: Instant,
     cancel: &dyn Fn() -> bool,
 ) -> Result<u32, FetchError> {
-    let (owner, name) = repo.split_once('/').ok_or_else(|| other(format!("repo inválido {repo}")))?;
+    let (owner, name) = repo.split_once('/').ok_or_else(|| other(format!("invalid repo {repo}")))?;
     let q = format!("repo:{repo} is:pr reviewed-by:{viewer} updated:>={}", w.search_since.format("%Y-%m-%d"));
     let mut counted: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
     let mut seen_cursors = std::collections::BTreeSet::new();
@@ -447,12 +447,12 @@ pub fn count_reviews_today(
             }
         }
         match page.next_cursor {
-            Some(c) if !seen_cursors.insert(c.clone()) => return Err(other("cursor repetido na paginação")),
+            Some(c) if !seen_cursors.insert(c.clone()) => return Err(other("repeated cursor in pagination")),
             Some(c) => cursor = Some(c),
             None => return Ok(counted.len() as u32),
         }
     }
-    Err(other("paginação excedeu o limite"))
+    Err(other("pagination exceeded the limit"))
 }
 
 #[cfg(test)]
@@ -526,7 +526,7 @@ mod tests {
 
         let mut v: Value = serde_json::from_str(&body(vec![])).unwrap();
         v["data"]["repository"] = Value::Null;
-        assert!(parse_page(&v.to_string(), "o/r").unwrap_err().message.contains("sem acesso"));
+        assert!(parse_page(&v.to_string(), "o/r").unwrap_err().message.contains("no access"));
 
         let mut truncated = pr_node(1, "h", "s", "cirdes", false);
         truncated["reviewRequests"]["pageInfo"]["hasNextPage"] = json!(true);
@@ -644,7 +644,7 @@ mod tests {
 
     #[test]
     fn reviewed_page_limits() {
-        assert!(parse_reviewed_page(&reviewed_body(1001, vec![], None), &window()).unwrap_err().message.contains("teto"));
+        assert!(parse_reviewed_page(&reviewed_body(1001, vec![], None), &window()).unwrap_err().message.contains("cap"));
         let mut v: Value = serde_json::from_str(&reviewed_body(0, vec![], None)).unwrap();
         v["data"]["repository"] = Value::Null;
         assert!(parse_reviewed_page(&v.to_string(), &window()).is_err());
@@ -729,7 +729,7 @@ mod tests {
         let (fake, node) = older_chain(10);
         fake.on("reviewed-by:cirdes", Output::ok(&reviewed_body(1, vec![node], None)));
         let err = count_reviews_today(&fake, "o/r", "cirdes", &window(), far(), &never).unwrap_err();
-        assert!(err.message.contains("histórico truncado"), "{}", err.message);
+        assert!(err.message.contains("history truncated"), "{}", err.message);
     }
 
     #[test]
@@ -764,7 +764,7 @@ mod tests {
     fn count_respects_deadline_and_repeated_cursor() {
         let fake = FakeRunner::new();
         let past = std::time::Instant::now() - Duration::from_secs(1);
-        assert!(count_reviews_today(&fake, "o/r", "cirdes", &window(), past, &never).unwrap_err().message.contains("orçamento"));
+        assert!(count_reviews_today(&fake, "o/r", "cirdes", &window(), past, &never).unwrap_err().message.contains("budget"));
         let fake = FakeRunner::new();
         fake.on("after=P1", Output::ok(&reviewed_body(2, vec![], Some("P1"))));
         fake.on("reviewed-by:cirdes", Output::ok(&reviewed_body(2, vec![], Some("P1"))));
@@ -785,7 +785,7 @@ mod tests {
         let slow = SlowRunner(Duration::from_millis(80), r#"{"data":{"viewer":{"login":"cirdes"}}}"#.into());
         let deadline = std::time::Instant::now() + Duration::from_millis(30);
         let err = fetch_viewer(&slow, deadline).unwrap_err();
-        assert!(err.message.contains("orçamento"), "{}", err.message);
+        assert!(err.message.contains("budget"), "{}", err.message);
 
         let fake = FakeRunner::new();
         fake.on("viewer", Output::ok(r#"{"data":{"viewer":{"login":"cirdes"}}}"#));

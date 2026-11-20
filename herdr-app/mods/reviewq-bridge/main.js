@@ -98,13 +98,13 @@ export default class ReviewqBridge extends View {
     if (errors.length) {
       text = errors.map(([m, e]) => `${m}: ${e}`).join(" · ");
     } else if (!remotes.length) {
-      text = "nenhuma máquina conectada";
+      text = "no machine connected";
     } else if (this.last) {
       const name = spaces().find((s) => s.id === this.last.id)?.name ?? this.last.id;
       const hhmm = new Date(this.last.at).toTimeString().slice(0, 5);
       text = `${remotes.map((m) => m.name).join(", ")} · ${hhmm} ${name}`;
     } else {
-      text = `ouvindo ${remotes.map((m) => m.name).join(", ")}`;
+      text = `listening to ${remotes.map((m) => m.name).join(", ")}`;
     }
     return h_flex().id("root").size_full().items_center().gap(6).px(10).bg(t.chrome).text_size(11)
       .child(div().text_color(t.muted).child("reviewq"))

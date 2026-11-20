@@ -8,8 +8,6 @@ When someone requests your review on a pull request, reviewq creates a git workt
 
 A herdr plugin adds a panel that shows your pending reviews, the state of each worktree, the CI of each PR and how many reviews you did today. It also lists the pull requests you opened and how many you opened in the last 24 hours.
 
-> The panel and messages are currently in Portuguese.
-
 ## How it works
 
 - **What it tracks.** Pull requests where your review was requested directly. It ignores PRs from forks and requests made only to a team you belong to.
@@ -95,21 +93,22 @@ The daemon opens a `reviewq` workspace with the panel every time it starts. herd
 | `open` | `herdr-reviewq ui open` | Opens the panel, or recreates it if you closed it |
 | `first-ready` | `herdr-reviewq focus first-ready` | Jumps to the oldest PR that is ready for review |
 | `sync-now` | `herdr-reviewq request sync` | Checks GitHub right away |
+| `release-all` | `herdr-reviewq request release-all` | Releases every adopted worktree; the ones with local work are kept and reported |
 
-The list has these sections, in order: **Iniciados** (pending reviews where an agent was opened, most recent first), **Pendentes**, **Meus PRs** (your open PRs, newest first), **Adotados**, **Sem sync** and **Saindo**. The counters show pending reviews, reviews done today and PRs you opened in the last 24 hours (`?` means some repo is missing or out of date).
+The list has these sections, in order: **Started** (pending reviews where an agent was opened, most recent first), **Pending**, **My PRs** (your open PRs, newest first), **Adopted**, **No sync** and **Leaving**. The counters show pending reviews, reviews done today and PRs you opened in the last 24 hours (`?` means some repo is missing or out of date).
 
 ### Columns
 
 | Column | What it shows |
 |---|---|
 | `PR` | The PR number (`#123`), or `owner/repo#123` when more than one repo is configured. |
-| icon | The worktree: `●` ready, `◐` being created or set up, `✗` setup failed, `⊘` blocked, `○` being removed, `◆` adopted by you. In **Meus PRs** it is the CI icon instead. |
-| `Estado` | The worktree state in words (`pronto`, `preparando`, `falhou · <step>`, `bloqueado · <reason>`, `removendo`), with extra detail where it matters: `sai em Nmin` for a PR leaving your queue, `seu · <reason>` for an adopted worktree, `GitHub sem sync` when the last sync for that repo failed. In **Meus PRs**: `aberto` or `rascunho`. |
+| icon | The worktree: `●` ready, `◐` being created or set up, `✗` setup failed, `⊘` blocked, `○` being removed, `◆` adopted by you. In **My PRs** it is the CI icon instead. |
+| `State` | The worktree state in words (`ready`, `preparing`, `failed · <step>`, `blocked · <reason>`, `removing`), with extra detail where it matters: `leaves in Nmin` for a PR leaving your queue, `yours · <reason>` for an adopted worktree, `GitHub not synced` when the last sync for that repo failed. In **My PRs**: `open` or `draft`. |
 | `CI` | The CI of the PR's latest commit on GitHub: `◐` running, `✓` passed and how long ago, `✗` failed and the first failing check, `?` not known for the current commit, empty before the first collection. When the check name does not fit the column, words are dropped from the end so the icon of the check survives (`✗ 🌐 System` becomes `✗ 🌐`). |
-| `Início` | When you started working on it: the first time an agent (Claude or Codex) was seen open in the PR's worktree, as `HH:MM` today or `dd/mm` on other days. `–` until that happens. It is not the PR's age. |
-| `Autor` | The PR author. `você` in **Meus PRs**. Hidden when the pane is too narrow. |
-| `Empilhado` | Whether the PR is stacked: `Não`, or `#<bottom PR> i/n` for its position in the stack. A PR is stacked when its base is the branch of another open PR in the repo. The stack is built from all open PRs of the repo, so the numbering stays the same when a PR in the middle or at the bottom leaves your queue; it only changes when a PR is closed or merged. Before the first collection, only the PRs in the list are used, and the cell is empty in **Meus PRs**. Hidden before `Autor` when the pane is too narrow. |
-| `Título` | The PR title, with whatever width is left. |
+| `Start` | When you started working on it: the first time an agent (Claude or Codex) was seen open in the PR's worktree, as `HH:MM` today or `Mon DD` (such as `Nov 18`) on other days. `–` until that happens. It is not the PR's age. |
+| `Author` | The PR author. `you` in **My PRs**. Hidden when the pane is too narrow. |
+| `Stacked` | Whether the PR is stacked: `No`, or `#<bottom PR> i/n` for its position in the stack. A PR is stacked when its base is the branch of another open PR in the repo. The stack is built from all open PRs of the repo, so the numbering stays the same when a PR in the middle or at the bottom leaves your queue; it only changes when a PR is closed or merged. Before the first collection, only the PRs in the list are used, and the cell is empty in **My PRs**. Hidden before `Author` when the pane is too narrow. |
+| `Title` | The PR title, with whatever width is left. |
 
 Columns are laid out by terminal cells, so an emoji in a check name does not shift the columns to its right.
 
@@ -128,19 +127,20 @@ Quitting the panel (`q`) closes its pane, because the pane ends with its command
 | `R` | Retry (managed PRs only, when setup failed or the worktree is missing) |
 | `a` | Adopt the worktree (asks for `y`/`n`) |
 | `r` | Release an adopted worktree (asks for `y`/`n`) |
+| `X` | Release all adopted worktrees at once (asks for `y`/`n`). Worktrees with uncommitted or unpushed work are kept, and the result line lists them |
 | `q` / `esc` / `ctrl+c` | Quit. With a search active, `esc` clears it instead |
 
-On your own PRs (**Meus PRs**) only `enter` and `o` do something; `l`, `R`, `a` and `r` apply to review worktrees.
+On your own PRs (**My PRs**) only `enter` and `o` do something; `l`, `R`, `a` and `r` apply to review worktrees.
 
 ### Search
 
-`/` filters the list as you type. Only matching rows stay, still grouped in their sections, and the footer shows how many match (`/eng-4321▏ (2 de 23)`).
+`/` filters the list as you type. Only matching rows stay, still grouped in their sections, and the footer shows how many match (`/eng-4321▏ (2 of 23)`).
 
-- **What it looks at:** the PR number (`123` or `#123`), repo, author, title and branch. The branch is where a Linear issue usually lives (`alice-eng-4321-fix`), so `eng-4321` finds the PR even if the title doesn't mention it. For **Meus PRs** the branch comes from the open PRs reviewq collects for stacks, so it is unknown until the first collection.
-- **How it matches:** fuzzy, ignoring case and accents. A word matches a field when its letters appear there in order, gaps allowed, so `crgimp` finds "Corrige importação" and `eng4321` finds `alice-eng-4321-fix`. The letters must all come from the same field: `101alice` doesn't join the number and the author. Several words must all match: `alice tela`.
+- **What it looks at:** the PR number (`123` or `#123`), repo, author, title and branch. The branch is where a Linear issue usually lives (`alice-eng-4321-fix`), so `eng-4321` finds the PR even if the title doesn't mention it. For **My PRs** the branch comes from the open PRs reviewq collects for stacks, so it is unknown until the first collection.
+- **How it matches:** fuzzy, ignoring case and accents. A word matches a field when its letters appear there in order, gaps allowed, so `crimp` finds "Correct importation" and `eng4321` finds `alice-eng-4321-fix`. The letters must all come from the same field: `101alice` doesn't join the number and the author. Several words must all match: `alice tela`.
 - **Order:** inside each section, the best matches come first. An exact piece of text beats scattered letters, and matches at the start of a word or with letters next to each other score more. Ties keep the usual order. A row waiting for `y`/`n` stays at the top of its section even if it doesn't match.
 - **While typing,** every letter goes into the search (`q`, `s`, `a`... don't trigger actions). `↑` `↓` move the selection, `backspace` deletes, `ctrl+u` clears the text, `enter` keeps the filter and gives the keys back, `esc` clears it. Other `ctrl`/`alt` combinations are ignored. A result that arrives while you type (a sync, say) shows on the top line.
-- **With the filter kept,** the top line shows `busca "<text>": n de m`. The filter survives list refreshes; `/` edits it and `esc` clears it. The counters (Pendentes, Feitas hoje, Abertos 24h) ignore the filter.
+- **With the filter kept,** the top line shows `search "<text>": n of m`. The filter survives list refreshes; `/` edits it and `esc` clears it. The counters (Pending, Done today, Opened 24h) ignore the filter.
 
 ## Command line
 
@@ -151,6 +151,7 @@ On your own PRs (**Meus PRs**) only `enter` and `o` do something; `l`, `R`, `a` 
 | `herdr-reviewq request retry --pr owner/repo#123` | Rerun a failed setup, or recreate a missing worktree (managed worktrees only) |
 | `herdr-reviewq request adopt --pr owner/repo#123` | Mark a worktree as yours before you work in it |
 | `herdr-reviewq request release --pr owner/repo#123` | Hand an adopted worktree back. Only works if it is clean and everything is pushed. |
+| `herdr-reviewq request release-all` | Hand back every adopted worktree. The ones that are not clean or not pushed are kept and listed in the result. |
 | `herdr-reviewq service restart` | Restart the daemon, for example after editing the config |
 | `herdr-reviewq service uninstall` | Remove the LaunchAgent |
 

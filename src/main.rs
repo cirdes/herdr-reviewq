@@ -10,7 +10,7 @@ use herdr_reviewq::{daemon, service, status, ui};
 use std::time::Instant;
 
 #[derive(Parser)]
-#[command(name = "herdr-reviewq", version, about = "Worktrees prontos para os reviews pedidos a você")]
+#[command(name = "herdr-reviewq", version, about = "Ready-to-use worktrees for the reviews requested from you")]
 struct Cli {
     #[command(subcommand)]
     cmd: Command,
@@ -18,30 +18,30 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Roda o reconciliador (usado pelo launchd)
+    /// Runs the reconciler (used by launchd)
     Daemon,
-    /// Mostra o estado atual
+    /// Shows the current state
     Status,
-    /// Envia um pedido ao daemon
+    /// Sends a request to the daemon
     Request {
         kind: Kind,
-        /// PR no formato owner/repo#n
+        /// PR as owner/repo#n
         #[arg(long)]
         pr: Option<String>,
     },
-    /// Gerencia o LaunchAgent
+    /// Manages the LaunchAgent
     Service {
         #[command(subcommand)]
         action: ServiceAction,
     },
-    /// Painel interativo (pane do plugin herdr)
+    /// Interactive panel (herdr plugin pane)
     Tui,
-    /// Workspace do painel no herdr
+    /// The panel workspace in herdr
     Ui {
         #[command(subcommand)]
         action: UiAction,
     },
-    /// Foca um PR no herdr
+    /// Focuses a PR in herdr
     Focus {
         #[command(subcommand)]
         target: FocusTarget,
@@ -50,15 +50,15 @@ enum Command {
 
 #[derive(Subcommand)]
 enum UiAction {
-    /// Garante o workspace reviewq com o TUI (sem foco)
+    /// Ensures the reviewq workspace with the TUI (without focus)
     Ensure,
-    /// Garante e foca o workspace reviewq
+    /// Ensures and focuses the reviewq workspace
     Open,
 }
 
 #[derive(Subcommand)]
 enum FocusTarget {
-    /// PR pronto há mais tempo
+    /// The PR that has been ready the longest
     FirstReady,
 }
 
@@ -72,6 +72,7 @@ enum Kind {
     Retry,
     Release,
     Adopt,
+    ReleaseAll,
 }
 
 #[derive(Subcommand)]
@@ -101,9 +102,10 @@ fn main() -> Result<()> {
                 Kind::Retry => RequestKind::Retry,
                 Kind::Release => RequestKind::Release,
                 Kind::Adopt => RequestKind::Adopt,
+                Kind::ReleaseAll => RequestKind::ReleaseAll,
             };
             let id = requests::write(&paths.requests_dir(), kind, pr)?;
-            println!("pedido {id} enviado; veja o resultado com `herdr-reviewq status`");
+            println!("request {id} sent; see the result with `herdr-reviewq status`");
             Ok(())
         }
         Command::Service { action } => match action {
@@ -149,7 +151,7 @@ fn main() -> Result<()> {
             let herdr = client.as_ref();
             let r = cfg.and_then(|cfg| match ui::focus_first_ready(herdr, &cfg, || State::read(&paths.state_file()))? {
                 Some(_) => Ok(()),
-                None => herdr.notify("reviewq", "nenhum PR pronto", "none"),
+                None => herdr.notify("reviewq", "no PR ready", "none"),
             });
             ui::notify_error(herdr, r)
         }

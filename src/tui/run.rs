@@ -43,11 +43,11 @@ pub enum Exit {
 impl std::fmt::Display for Exit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Exit::Key(k) => write!(f, "tecla {k}"),
-            Exit::Signal(libc::SIGINT) => f.write_str("sinal SIGINT"),
-            Exit::Signal(libc::SIGTERM) => f.write_str("sinal SIGTERM"),
-            Exit::Signal(libc::SIGHUP) => f.write_str("sinal SIGHUP"),
-            Exit::Signal(n) => write!(f, "sinal {n}"),
+            Exit::Key(k) => write!(f, "key {k}"),
+            Exit::Signal(libc::SIGINT) => f.write_str("signal SIGINT"),
+            Exit::Signal(libc::SIGTERM) => f.write_str("signal SIGTERM"),
+            Exit::Signal(libc::SIGHUP) => f.write_str("signal SIGHUP"),
+            Exit::Signal(n) => write!(f, "signal {n}"),
         }
     }
 }
@@ -69,8 +69,8 @@ fn key_name(k: &Key) -> String {
 /// então este é o único rastro de um erro do TUI.
 pub fn log_outcome(log: &Path, r: &Result<Exit>) {
     let msg = match r {
-        Ok(exit) => format!("tui encerrado: {exit}"),
-        Err(e) => format!("tui encerrou com erro: {e:#}"),
+        Ok(exit) => format!("tui stopped: {exit}"),
+        Err(e) => format!("tui stopped with an error: {e:#}"),
     };
     let _ = crate::applog::append(log, &msg);
 }
@@ -78,7 +78,7 @@ pub fn log_outcome(log: &Path, r: &Result<Exit>) {
 /// Braço `tui` do `main`: registra início e fim (ou erro) no `tui.log` e devolve o erro ao `main`.
 pub fn run_logged(paths: Paths, load_cfg: impl FnOnce() -> Result<Config>) -> Result<()> {
     let log = paths.tui_log_file();
-    let _ = crate::applog::append(&log, &format!("tui iniciado (pid {})", std::process::id()));
+    let _ = crate::applog::append(&log, &format!("tui started (pid {})", std::process::id()));
     let r = load_cfg().and_then(|cfg| run(paths, cfg));
     log_outcome(&log, &r);
     r.map(|_| ())
@@ -221,8 +221,8 @@ fn guarded(f: impl FnOnce() -> String) -> String {
                 .downcast_ref::<&str>()
                 .map(|s| s.to_string())
                 .or_else(|| p.downcast_ref::<String>().cloned())
-                .unwrap_or_else(|| "pânico".into());
-            format!("a ação falhou: {why}")
+                .unwrap_or_else(|| "panic".into());
+            format!("the action failed: {why}")
         }
     }
 }
@@ -237,11 +237,11 @@ fn perform(action: &Action, ctx: &WorkerCtx) -> String {
     };
     let state = match State::read(&ctx.paths.state_file()) {
         Ok(s) => s,
-        Err(e) => return format!("não consegui ler o estado: {e:#}"),
+        Err(e) => return format!("could not read the state: {e:#}"),
     };
     if let Action::Focus(_) = action {
         return match crate::ui::focus_pr(ctx.herdr, ctx.cfg, &state, key) {
-            Ok(()) => format!("abrindo {key}"),
+            Ok(()) => format!("opening {key}"),
             Err(e) => format!("{e:#}"),
         };
     }
@@ -255,7 +255,7 @@ fn perform(action: &Action, ctx: &WorkerCtx) -> String {
             .map(|p| p.url.clone()),
         _ => state.get(key).map(|r| r.url.clone()),
     };
-    let Some(url) = url else { return format!("{key} não está mais no painel") };
+    let Some(url) = url else { return format!("{key} is no longer in the panel") };
     if let Action::OpenUrl(..) = action {
         let url = &url;
         let opened = ctx
@@ -263,18 +263,18 @@ fn perform(action: &Action, ctx: &WorkerCtx) -> String {
             .run(&Cmd::new("open").arg(url.clone()).timeout(UI_CALL_TIMEOUT))
             .map(|o| o.success())
             .unwrap_or(false);
-        let head = if opened { "abrindo no navegador desta máquina" } else { "não consegui abrir o navegador" };
-        return format!("{head} · URL enviada ao clipboard do terminal: {url}");
+        let head = if opened { "opening in this machine's browser" } else { "could not open the browser" };
+        return format!("{head} · URL sent to the terminal clipboard: {url}");
     }
     let log = ctx.paths.setup_log(key);
     if !log.exists() {
-        return "sem log ainda".into();
+        return "no log yet".into();
     }
     if ctx.cfg.backend == crate::config::Backend::HerdrApp {
         return show_log_in_app(ctx.runner, &log);
     }
     match &ctx.pane {
-        None => format!("log em {}", log.display()),
+        None => format!("log at {}", log.display()),
         Some(pane) => show_log(ctx.runner, &ctx.routing, pane, &log),
     }
 }
@@ -283,8 +283,8 @@ fn perform(action: &Action, ctx: &WorkerCtx) -> String {
 fn show_log_in_app(runner: &dyn Runner, log: &Path) -> String {
     let args = serde_json::json!({ "direction": "down", "argv": ["less", "+F", log.to_string_lossy()] });
     match runner.run(&Cmd::new("herdr-app").args(["do", "pane.split"]).arg(args.to_string()).timeout(UI_CALL_TIMEOUT)) {
-        Ok(o) if o.success() => "log aberto abaixo".into(),
-        _ => format!("não consegui abrir o split do log; log em {}", log.display()),
+        Ok(o) if o.success() => "log opened below".into(),
+        _ => format!("could not open the log split; log at {}", log.display()),
     }
 }
 
@@ -304,10 +304,10 @@ fn show_log(runner: &dyn Runner, routing: &UiRouting, pane: &str, log: &Path) ->
         .filter(|o| o.success())
         .and_then(|o| crate::herdr::parse_response(&o).ok())
         .and_then(|v| v.pointer("/pane/pane_id").and_then(|p| p.as_str()).map(String::from));
-    let Some(new_pane) = new_pane else { return "não consegui abrir o split do log".into() };
+    let Some(new_pane) = new_pane else { return "could not open the log split".into() };
     match runner.run(&herdr_cmd(routing).args(["pane", "run", &new_pane]).arg(log_command(log))) {
-        Ok(o) if o.success() => "log aberto abaixo".into(),
-        _ => "não consegui rodar o less no split".into(),
+        Ok(o) if o.success() => "log opened below".into(),
+        _ => "could not run less in the split".into(),
     }
 }
 
@@ -357,7 +357,7 @@ impl ActionQueue {
         }
         if self.tx.send(action.clone()).is_err() {
             self.pending.done(&action);
-            bail!("o worker de ações do TUI parou");
+            bail!("the TUI action worker stopped");
         }
         Ok(true)
     }
@@ -392,7 +392,7 @@ fn spawn_worker(cfg: Config, paths: Paths) -> (ActionQueue, mpsc::Receiver<Strin
                 }
             }
         })
-        .expect("não consegui criar a thread do worker do TUI");
+        .expect("could not create the TUI worker thread");
     (queue, msgs)
 }
 
@@ -417,7 +417,7 @@ impl StateWatch {
                 self.state = if m.is_some() { Some(s) } else { None };
                 self.read_error = None;
             }
-            Err(e) => self.read_error = Some(format!("estado ilegível: {e:#}")),
+            Err(e) => self.read_error = Some(format!("unreadable state: {e:#}")),
         }
     }
 }
@@ -443,10 +443,10 @@ const OVERSLEEP: Duration = Duration::from_secs(1);
 /// basta (pode ser só lentidão): só mata quando `tty_alive` confirma que o terminal sumiu.
 fn watchdog_verdict(since_beat: Duration, since_stop: Option<Duration>, tty_alive: &dyn Fn() -> bool) -> Option<(i32, &'static str)> {
     if since_stop.is_some_and(|t| t >= STOP_GRACE) {
-        return Some((0, "sinal recebido e o loop não saiu em 1 s"));
+        return Some((0, "signal received and the loop did not exit within 1 s"));
     }
     if since_beat >= STALL && !tty_alive() {
-        return Some((1, "loop parado e o terminal sumiu"));
+        return Some((1, "loop stalled and the terminal is gone"));
     }
     None
 }
@@ -503,7 +503,7 @@ const WATCHDOG_THREAD: &str = "tui-watchdog";
 /// pty do pane). Nunca entra em pânico: com o pane fechado, escrever no pty dá EIO, e `eprintln!`
 /// entraria em pânico antes do `exit`, deixando o processo girando.
 fn report_exit(log: &Path, err: &mut dyn Write, why: &str) {
-    let msg = format!("tui encerrado pelo watchdog: {why}");
+    let msg = format!("tui stopped by the watchdog: {why}");
     let _ = crate::applog::append(log, &msg);
     let _ = writeln!(err, "herdr-reviewq: {msg}");
     let _ = err.flush();
@@ -531,20 +531,20 @@ fn spawn_watchdog(epoch: Instant, log: PathBuf) {
     });
     if let Err(e) = spawned {
         // sem watchdog o TUI ainda funciona; só perde a saída forçada com o tty morto
-        let _ = crate::applog::append(&fallback_log, &format!("não consegui criar a thread do watchdog: {e}"));
+        let _ = crate::applog::append(&fallback_log, &format!("could not create the watchdog thread: {e}"));
     }
 }
 
 /// Pânico fora da thread da UI: o TUI segue de pé, então o texto vai para o `tui.log`.
 fn record_panic(log: &Path, thread: Option<&str>, info: &dyn std::fmt::Display) {
-    let _ = crate::applog::append(log, &format!("pânico na thread {}: {info}", thread.unwrap_or("sem nome")));
+    let _ = crate::applog::append(log, &format!("panic in thread {}: {info}", thread.unwrap_or("unnamed")));
 }
 
 fn install_signals() -> Result<()> {
     for sig in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP] {
         let prev = unsafe { libc::signal(sig, on_signal as *const () as libc::sighandler_t) };
         if prev == libc::SIG_ERR {
-            bail!("não consegui instalar o tratador do sinal {sig}: {}", std::io::Error::last_os_error());
+            bail!("could not install the handler for signal {sig}: {}", std::io::Error::last_os_error());
         }
     }
     Ok(())
@@ -562,7 +562,7 @@ pub fn run(paths: Paths, cfg: Config) -> Result<Exit> {
         if current.id() == ui_thread {
             restore_terminal();
             // o pane fecha com o processo e leva o stderr: o pânico também fica no tui.log
-            record_panic(&tui_log, Some("da UI"), info);
+            record_panic(&tui_log, Some("UI"), info);
             default_hook(info);
         } else {
             record_panic(&tui_log, current.name(), info);
@@ -607,7 +607,7 @@ pub fn run(paths: Paths, cfg: Config) -> Result<Exit> {
                 Ok(msg) if !msg.is_empty() => ui.message = Some(msg),
                 Ok(_) => {}
                 Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => bail!("o worker de ações do TUI parou"),
+                Err(TryRecvError::Disconnected) => bail!("the TUI action worker stopped"),
             }
         }
         let mut view = View::build(watch.state.as_ref(), &ui, &view_cfg, &facts, chrono::Utc::now());
@@ -629,7 +629,7 @@ pub fn run(paths: Paths, cfg: Config) -> Result<Exit> {
             Some(Action::Quit) => return Ok(Exit::Key(key_name(&key))),
             Some(Action::Request(kind, pr)) => match requests::write(&paths.requests_dir(), kind, pr.as_ref().map(|k| k.to_string())) {
                 Ok(id) => ui.sent.push(Sent { id, kind, pr, at: chrono::Utc::now() }),
-                Err(e) => ui.message = Some(format!("não consegui enviar o pedido: {e:#}")),
+                Err(e) => ui.message = Some(format!("could not send the request: {e:#}")),
             },
             Some(other) => {
                 if let Action::OpenUrl(_, url) = &other {
@@ -690,16 +690,16 @@ mod tests {
         let text = std::fs::read_to_string(&log).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 3, "{text}");
-        assert!(lines[0].ends_with("tui encerrado: tecla q"), "{text}");
-        assert!(lines[1].ends_with("tui encerrado: sinal SIGTERM"), "{text}");
-        assert!(lines[2].ends_with("tui encerrou com erro: event::read: pty sumiu"), "{text}");
+        assert!(lines[0].ends_with("tui stopped: key q"), "{text}");
+        assert!(lines[1].ends_with("tui stopped: signal SIGTERM"), "{text}");
+        assert!(lines[2].ends_with("tui stopped with an error: event::read: pty sumiu"), "{text}");
     }
 
     #[test]
     fn exit_reason_names_signals() {
-        assert_eq!(Exit::Signal(libc::SIGHUP).to_string(), "sinal SIGHUP");
-        assert_eq!(Exit::Signal(libc::SIGINT).to_string(), "sinal SIGINT");
-        assert_eq!(Exit::Signal(99).to_string(), "sinal 99");
+        assert_eq!(Exit::Signal(libc::SIGHUP).to_string(), "signal SIGHUP");
+        assert_eq!(Exit::Signal(libc::SIGINT).to_string(), "signal SIGINT");
+        assert_eq!(Exit::Signal(99).to_string(), "signal 99");
     }
 
     #[test]
@@ -756,18 +756,18 @@ mod tests {
 
         save(&fx, Phase::Removing);
         let msg = perform(&Action::Focus(key.clone()), &ctx);
-        assert!(msg.contains("removido"), "{msg}");
+        assert!(msg.contains("removed"), "{msg}");
         assert!(h.focused.borrow().is_none());
 
         save(&fx, Phase::Ready);
         let msg = perform(&Action::Focus(key.clone()), &ctx);
-        assert_eq!(msg, "abrindo o/r#7");
+        assert_eq!(msg, "opening o/r#7");
         assert_eq!(h.focused.borrow().as_deref(), Some("w42"));
 
         std::fs::remove_file(fx.paths.state_file()).unwrap();
         std::fs::write(fx.paths.state_file(), "{lixo").unwrap();
         let msg = perform(&Action::Focus(key), &ctx);
-        assert!(msg.contains("estado"), "{msg}");
+        assert!(msg.contains("state"), "{msg}");
     }
 
     #[test]
@@ -788,8 +788,8 @@ mod tests {
             assert!(m.contains(url), "{m}");
             assert!(!m.contains("copiada"), "{m}");
         }
-        assert!(ok.contains("abrindo"), "{ok}");
-        assert!(bad.contains("não consegui"), "{bad}");
+        assert!(ok.contains("opening"), "{ok}");
+        assert!(bad.contains("could not"), "{bad}");
     }
 
     #[test]
@@ -804,14 +804,14 @@ mod tests {
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(&log, "ok").unwrap();
         let m = perform(&Action::OpenUrl(RowId::Review(gone.clone()), "https://github.com/o/r/pull/8".into()), &ctx);
-        assert!(m.contains("não está mais no painel"), "{m}");
+        assert!(m.contains("is no longer in the panel"), "{m}");
         let m = perform(&Action::ShowLog(gone), &ctx);
-        assert!(m.contains("não está mais no painel"), "{m}");
+        assert!(m.contains("is no longer in the panel"), "{m}");
         assert!(runner.calls.borrow().is_empty(), "PR sumido: nada roda");
 
         std::fs::write(fx.paths.state_file(), "{lixo").unwrap();
         let m = perform(&Action::OpenUrl(RowId::Review(PrKey::new("o/r", 7)), "x".into()), &ctx);
-        assert!(m.contains("estado"), "{m}");
+        assert!(m.contains("state"), "{m}");
     }
 
     #[test]
@@ -840,12 +840,12 @@ mod tests {
         runner.on("open https://github.com/o/r/pull/9", Output::ok(""));
         let ctx = WorkerCtx { herdr: &h, runner: &runner, cfg: &fx.cfg, paths: &fx.paths, routing: routing(), pane: None };
         let m = perform(&Action::OpenUrl(RowId::Mine(PrKey::new("o/r", 9)), "https://velha".into()), &ctx);
-        assert!(m.contains("abrindo") && m.contains("https://github.com/o/r/pull/9"), "{m}");
+        assert!(m.contains("opening") && m.contains("https://github.com/o/r/pull/9"), "{m}");
         let m = perform(&Action::OpenUrl(RowId::Mine(PrKey::new("o/r", 8)), "x".into()), &ctx);
-        assert!(m.contains("não está mais no painel"), "{m}");
+        assert!(m.contains("is no longer in the panel"), "{m}");
         // o mesmo número como review não existe: Mine não cai em State.prs
         let m = perform(&Action::OpenUrl(RowId::Review(PrKey::new("o/r", 9)), "x".into()), &ctx);
-        assert!(m.contains("não está mais no painel"), "{m}");
+        assert!(m.contains("is no longer in the panel"), "{m}");
     }
 
     #[test]
@@ -856,18 +856,18 @@ mod tests {
         let runner = FakeRunner::new();
         save(&fx, Phase::Ready);
         let ctx = WorkerCtx { herdr: &h, runner: &runner, cfg: &fx.cfg, paths: &fx.paths, routing: routing(), pane: None };
-        assert_eq!(perform(&Action::ShowLog(key.clone()), &ctx), "sem log ainda");
+        assert_eq!(perform(&Action::ShowLog(key.clone()), &ctx), "no log yet");
 
         let log = fx.paths.setup_logs_dir().join("o-r-pr-7.log");
         std::fs::create_dir_all(log.parent().unwrap()).unwrap();
         std::fs::write(&log, "ok").unwrap();
         let msg = perform(&Action::ShowLog(key.clone()), &ctx);
-        assert_eq!(msg, format!("log em {}", log.display()));
+        assert_eq!(msg, format!("log at {}", log.display()));
 
         runner.on("pane split", Output::ok(r#"{"result":{"pane":{"pane_id":"w1:p9"}}}"#));
         runner.on("pane run", Output::ok(r#"{"result":{}}"#));
         let ctx = WorkerCtx { pane: Some("w1:p2".into()), ..ctx };
-        assert_eq!(perform(&Action::ShowLog(key), &ctx), "log aberto abaixo");
+        assert_eq!(perform(&Action::ShowLog(key), &ctx), "log opened below");
         let calls = runner.calls.borrow();
         assert_eq!(calls[0].line(), "/opt/herdr --session main pane split w1:p2 --direction down");
         assert_eq!(calls[1].program, "/opt/herdr");
@@ -881,7 +881,7 @@ mod tests {
         std::panic::set_hook(Box::new(|_| {}));
         let msg = guarded(|| panic!("boom"));
         std::panic::set_hook(prev);
-        assert!(msg.contains("falhou") && msg.contains("boom"), "{msg}");
+        assert!(msg.contains("failed") && msg.contains("boom"), "{msg}");
         assert_eq!(guarded(|| "ok".to_string()), "ok");
     }
 
@@ -1046,9 +1046,9 @@ mod tests {
     fn exit_report_survives_eio_on_stderr_and_still_logs() {
         let fx = fx();
         let log = fx.paths.tui_log_file();
-        report_exit(&log, &mut EioWriter, "loop parado e o terminal sumiu");
+        report_exit(&log, &mut EioWriter, "loop stalled and the terminal is gone");
         let text = std::fs::read_to_string(&log).unwrap();
-        assert!(text.contains("tui encerrado pelo watchdog: loop parado e o terminal sumiu"), "{text}");
+        assert!(text.contains("tui stopped by the watchdog: loop stalled and the terminal is gone"), "{text}");
     }
 
     #[test]
@@ -1058,9 +1058,9 @@ mod tests {
         let log = fx.paths.tui_log_file();
         let mut tty = unsafe { std::fs::File::from_raw_fd(hung_up_slave()) };
         assert!(std::io::Write::write_all(&mut tty, b"x\n").is_err(), "pty sem mestre: a escrita falha");
-        report_exit(&log, &mut tty, "sinal recebido e o loop não saiu em 1 s");
+        report_exit(&log, &mut tty, "signal received and the loop did not exit within 1 s");
         let text = std::fs::read_to_string(&log).unwrap();
-        assert!(text.contains("sinal recebido"), "{text}");
+        assert!(text.contains("signal received"), "{text}");
     }
 
     #[test]
