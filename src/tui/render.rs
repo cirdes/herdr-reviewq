@@ -197,7 +197,7 @@ fn draw_list(f: &mut Frame, area: Rect, view: &View, ui: &UiState) {
     const CI_W: usize = 10;
     const START_W: usize = 6;
     const STACK_HEAD: &str = "Empilhado";
-    let label_w = view.rows.iter().map(|r| cells(&r.label)).max().unwrap_or(0).clamp(4, 12);
+    let label_w = view.rows.iter().map(|r| cells(&r.label)).max().unwrap_or(0).clamp(4, 22);
     let prefix = 2 + label_w + 1 + 1 + 1;
     let rest = (area.width as usize).saturating_sub(prefix);
     let max_status = view.rows.iter().map(|r| cells(&r.status)).max().unwrap_or(6).max(6);
@@ -348,6 +348,21 @@ mod tests {
         let iniciados = out.find("Iniciados").unwrap();
         let pendentes = out.rfind(" Pendentes").unwrap();
         assert!(iniciados < pendentes, "{out}");
+    }
+
+    #[test]
+    fn several_repos_show_repo_name_in_full() {
+        let c = ViewConfig { repos: vec!["linkanalabs/linkana".into(), "linkanalabs/vernissage".into()], ..cfg() };
+        let mut s = base_state();
+        s.insert(PrRecord::fixture("linkanalabs/linkana", 15672, "x", "s"));
+        s.insert(PrRecord::fixture("linkanalabs/vernissage", 312, "y", "s"));
+        let view = View::build(Some(&s), &UiState::default(), &c, &UiFacts::default(), Utc::now());
+        for w in [60u16, 110] {
+            let out = screen(w, 24, &view, &UiState::default());
+            for needle in ["linkana#15672", "vernissage#312"] {
+                assert!(out.contains(needle), "{w} faltou {needle}:\n{out}");
+            }
+        }
     }
 
     #[test]
