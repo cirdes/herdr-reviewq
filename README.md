@@ -122,7 +122,7 @@ Quitting the panel (`q`) closes its pane, because the pane ends with its command
 |---|---|
 | `↑` `↓` / `k` `j` | Move the selection |
 | `/` | Search: filter the list as you type (see [Search](#search)) |
-| `enter` | Open the PR's workspace (recreated if it was closed). On your own PRs, open the PR in the browser |
+| `enter` | Open the PR's workspace (recreated if it was closed). On your own PRs, focus the worktree where the PR's branch is checked out; if there is none, create one at `worktrees_dir/<owner>/<repo>/mine-pr-<n>` and open it in herdr |
 | `o` | Open the PR in the browser on the daemon's machine, and copy the URL through OSC 52 (handy over a remote session) |
 | `l` | Open the PR's setup log |
 | `s` | Sync now |
@@ -132,7 +132,7 @@ Quitting the panel (`q`) closes its pane, because the pane ends with its command
 | `X` | Release all adopted worktrees at once (asks for `y`/`n`). Worktrees with uncommitted work, or unpushed work on a PR that is still open, are kept, and the result line lists them |
 | `q` / `esc` / `ctrl+c` | Quit. With a search active, `esc` clears it instead |
 
-On your own PRs (**My PRs**) only `enter` and `o` do something; `l`, `R`, `a` and `r` apply to review worktrees.
+On your own PRs (**My PRs**) only `enter` and `o` do something; `l`, `R`, `a` and `r` apply to review worktrees. A worktree created by `enter` on your own PR is yours: reviewq doesn't run the repo's setup in it, doesn't track it and never removes it. If the branch already exists locally, it is checked out as it is (never reset to `origin`); otherwise it starts at `origin/<branch>` with the upstream set. The branch comes from the open PRs reviewq collects for stacks, so `enter` only works after the first collection.
 
 ### Search
 

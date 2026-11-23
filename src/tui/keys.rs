@@ -18,6 +18,8 @@ pub enum Key {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {
     Focus(PrKey),
+    /// Enter num PR seu: foca o worktree da branch, criando se não houver.
+    OpenMine(PrKey),
     /// Linha e a URL vista na tela (copiada na hora); o worker relê a URL do estado.
     OpenUrl(RowId, String),
     ShowLog(PrKey),
@@ -167,9 +169,13 @@ pub fn handle(key: Key, ui: &UiState, view: &View) -> (UiState, Option<Action>) 
         _ => {
             let Some(row) = selected else { return (next, None) };
             let Some(key_pr) = row.id.review() else {
-                // meus PRs: só abrir no navegador
+                // meus PRs: enter vai para o worktree (criado se faltar), `o` abre no navegador
                 match key {
-                    Key::Enter | Key::Char('o') => return (next, Some(Action::OpenUrl(row.id.clone(), row.url.clone()))),
+                    Key::Enter => {
+                        next.message = Some(format!("opening the worktree of {}…", row.id.key()));
+                        return (next, Some(Action::OpenMine(row.id.key().clone())));
+                    }
+                    Key::Char('o') => return (next, Some(Action::OpenUrl(row.id.clone(), row.url.clone()))),
                     Key::Char('l' | 'R' | 'a' | 'r') => next.message = Some("only for review PRs".into()),
                     _ => {}
                 }
@@ -248,10 +254,12 @@ mod tests {
     }
 
     #[test]
-    fn enter_and_o_on_mine_open_url() {
+    fn enter_on_mine_opens_worktree_and_o_opens_url() {
         let v = view_with_mine(vec![PrRecord::fixture("o/r", 9, "x", "s")], &[9]);
+        let (ui, a) = handle(Key::Enter, &mine_at(9), &v);
+        assert_eq!(a, Some(Action::OpenMine(PrKey::new("o/r", 9))));
+        assert!(ui.message.unwrap().contains("o/r#9"));
         let want = Action::OpenUrl(RowId::Mine(PrKey::new("o/r", 9)), "https://github.com/o/r/pull/9".into());
-        assert_eq!(handle(Key::Enter, &mine_at(9), &v).1, Some(want.clone()));
         assert_eq!(handle(Key::Char('o'), &mine_at(9), &v).1, Some(want));
     }
 
