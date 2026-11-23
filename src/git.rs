@@ -1,7 +1,7 @@
 use crate::runner::{Cmd, Output, Runner};
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 const REVIEWR_BASE_PICK: &str = "refs/worktree/reviewr/base-pick";
@@ -127,6 +127,21 @@ impl<'a> Git<'a> {
         Ok(self.ok(repo, &["worktree", "list", "--porcelain"])?.lines().any(|l| l == want))
     }
 
+    /// Caminho do worktree (o clone principal inclusive) onde `branch` está em checkout.
+    pub fn worktree_of_branch(&self, repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
+        let want = format!("branch refs/heads/{branch}");
+        let mut current: Option<&str> = None;
+        let list = self.ok(repo, &["worktree", "list", "--porcelain"])?;
+        for line in list.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                current = Some(p);
+            } else if line == want {
+                return Ok(current.map(PathBuf::from));
+            }
+        }
+        Ok(None)
+    }
+
     /// Só refs de `origin` contam como prova de que o commit está publicado.
     pub fn is_reachable_from_origin(&self, repo: &Path, sha: &str) -> Result<bool> {
         let out = self.ok(repo, &["for-each-ref", "--contains", sha, "--format=%(refname)", "refs/remotes/origin"])?;
@@ -171,6 +186,20 @@ mod tests {
         let fx = fixture("feat/x");
         let g = Git::new(&RealRunner);
         assert_eq!(g.fetch_branch(&fx.clone, "feat/x").unwrap(), fx.remote_sha("feat/x"));
+    }
+
+    #[test]
+    fn worktree_of_branch_finds_main_clone_and_linked() {
+        let fx = fixture("feat/x");
+        let g = Git::new(&RealRunner);
+        g.fetch_branch(&fx.clone, "feat/x").unwrap();
+        assert_eq!(g.worktree_of_branch(&fx.clone, "feat/x").unwrap(), None);
+        assert_eq!(g.worktree_of_branch(&fx.clone, "main").unwrap(), Some(fx.clone.clone()));
+        let wt = fx.root.join("wt-of");
+        git(&fx.clone, &["worktree", "add", "-q", "-b", "feat/x", wt.to_str().unwrap(), "origin/feat/x"]);
+        assert_eq!(g.worktree_of_branch(&fx.clone, "feat/x").unwrap(), Some(wt));
+        // prefixo não conta: feat/x não casa feat/xy
+        assert_eq!(g.worktree_of_branch(&fx.clone, "feat").unwrap(), None);
     }
 
     #[test]

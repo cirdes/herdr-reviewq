@@ -231,7 +231,7 @@ fn guarded(f: impl FnOnce() -> String) -> String {
 /// o PR tem de continuar no painel, e URL e log saem do registro relido.
 fn perform(action: &Action, ctx: &WorkerCtx) -> String {
     let key = match action {
-        Action::Focus(key) | Action::ShowLog(key) => key,
+        Action::Focus(key) | Action::ShowLog(key) | Action::OpenMine(key) => key,
         Action::OpenUrl(id, _) => id.key(),
         _ => return String::new(),
     };
@@ -239,6 +239,13 @@ fn perform(action: &Action, ctx: &WorkerCtx) -> String {
         Ok(s) => s,
         Err(e) => return format!("could not read the state: {e:#}"),
     };
+    if let Action::OpenMine(_) = action {
+        return match crate::ui::open_mine(ctx.herdr, &crate::git::Git::new(ctx.runner), ctx.cfg, &state, key) {
+            Ok(crate::ui::MineOpened::Focused(_)) => format!("opening {key}"),
+            Ok(crate::ui::MineOpened::Created(path)) => format!("created the worktree of {key} at {}", path.display()),
+            Err(e) => format!("{e:#}"),
+        };
+    }
     if let Action::Focus(_) = action {
         return match crate::ui::focus_pr(ctx.herdr, ctx.cfg, &state, key) {
             Ok(()) => format!("opening {key}"),

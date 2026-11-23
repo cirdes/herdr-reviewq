@@ -1,9 +1,10 @@
 use crate::config::Config;
-use crate::herdr::Herdr;
+use crate::git::Git;
+use crate::herdr::{CreateReq, Herdr};
 use crate::state::{Ownership, Phase, PrKey, Remote, State};
 use anyhow::{bail, Context, Result};
 use fs2::FileExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 pub const UI_LABEL: &str = "reviewq";
@@ -178,6 +179,83 @@ pub fn focus_pr(herdr: &dyn Herdr, cfg: &Config, state: &State, key: &PrKey) -> 
         .find_workspace(&repo.path, &rec.path)?
         .with_context(|| format!("herdr did not find the worktree of {key}"))?;
     herdr.focus_workspace(&ws, Instant::now() + UI_CALL_TIMEOUT)
+}
+
+/// Onde o painel cria o worktree de um PR seu: ao lado dos de review, com outro nome
+/// (`pr-N` é do daemon, que remove o que é dele).
+pub fn mine_worktree_path(dir: &Path, key: &PrKey) -> PathBuf {
+    dir.join(&key.repo).join(format!("mine-pr-{}", key.number))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum MineOpened {
+    /// A branch já tinha worktree (criado aqui ou à mão): só focou.
+    Focused(PathBuf),
+    Created(PathBuf),
+}
+
+/// Enter num PR seu. Se a branch do PR já está em algum worktree do clone, foca o workspace dele;
+/// senão cria um em `mine_worktree_path` e foca. O worktree é seu: o daemon não acompanha nem
+/// remove, e o setup do repo não roda.
+pub fn open_mine(herdr: &dyn Herdr, git: &Git, cfg: &Config, state: &State, key: &PrKey) -> Result<MineOpened> {
+    let pr = state
+        .my_prs
+        .repos
+        .get(&key.repo)
+        .and_then(|m| m.prs.iter().find(|p| p.number == key.number))
+        .with_context(|| format!("{key} is no longer in the panel"))?;
+    // meus PRs não guardam a branch; ela vem dos PRs abertos coletados para as pilhas
+    let branch = state
+        .open_prs
+        .repos
+        .get(&key.repo)
+        .and_then(|o| o.prs.iter().find(|p| p.number == key.number))
+        .map(|p| p.head_ref.clone())
+        .with_context(|| format!("the branch of {key} is not known yet; try again after the next sync"))?;
+    let repo = cfg.repo(&key.repo).with_context(|| format!("repo {} is not in the config", key.repo))?;
+
+    let (path, ws, created) = match git.worktree_of_branch(&repo.path, &branch)? {
+        Some(path) => {
+            if !path.exists() {
+                bail!("branch {branch} is checked out in {}, which no longer exists; run `git worktree prune` in the clone", path.display());
+            }
+            let ws = herdr
+                .find_workspace(&repo.path, &path)?
+                .with_context(|| format!("herdr did not find the worktree at {}", path.display()))?;
+            (path, ws, false)
+        }
+        None => {
+            let path = mine_worktree_path(&cfg.worktrees_dir, key);
+            if path.exists() {
+                bail!("{} already exists and is not a worktree of {branch}; check it and remove it by hand", path.display());
+            }
+            git.fetch_branch(&repo.path, &branch)?;
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let ws = if git.ref_sha(&repo.path, &format!("refs/heads/{branch}"))?.is_some() {
+                // branch local que já existe (talvez com commits seus): usa como está, sem resetar
+                git.ok(&repo.path, &["worktree", "add", "-q", &path.to_string_lossy(), &branch])?;
+                herdr
+                    .find_workspace(&repo.path, &path)?
+                    .with_context(|| format!("herdr did not open the worktree at {}", path.display()))?
+            } else {
+                let created = herdr.create_worktree(&CreateReq {
+                    repo: repo.path.clone(),
+                    branch: branch.clone(),
+                    base: format!("origin/{branch}"),
+                    path: path.clone(),
+                    label: format!("#{} {}", key.number, pr.title),
+                })?;
+                // sem upstream o push pede `-u`; falhar aqui não desfaz o worktree
+                let _ = git.set_upstream(&path, &branch);
+                created.workspace_id
+            };
+            (path, ws, true)
+        }
+    };
+    herdr.focus_workspace(&ws, Instant::now() + UI_CALL_TIMEOUT)?;
+    Ok(if created { MineOpened::Created(path) } else { MineOpened::Focused(path) })
 }
 
 #[cfg(test)]
@@ -540,5 +618,94 @@ mod tests {
         s.insert(rec);
         assert!(focus_pr(&h, &c, &s, &key).unwrap_err().to_string().contains("did not find"));
         assert!(h.focused.borrow().is_none());
+    }
+
+    /// Estado com o PR seu #9 na branch `feat/x` (dado fictício).
+    fn mine_state(branch: Option<&str>) -> State {
+        use crate::state::{MyPr, MyPrsRepo, OpenPr, OpenPrsRepo};
+        let mut s = State::default();
+        let now = chrono::Utc::now();
+        let pr = MyPr { number: 9, title: "Ajusta o cache".into(), url: "https://github.com/o/r/pull/9".into(), draft: false, created_at: now, head_sha: "m".into(), ci: None };
+        s.my_prs.repos.insert("o/r".into(), MyPrsRepo { prs: vec![pr], opened_24h: 1, as_of: now });
+        if let Some(b) = branch {
+            let open = OpenPr { number: 9, head_ref: b.into(), base_ref: "main".into() };
+            s.open_prs.repos.insert("o/r".into(), OpenPrsRepo { prs: vec![open], default_branch: Some("main".into()), as_of: now });
+        }
+        s
+    }
+
+    #[test]
+    fn open_mine_creates_worktree_tracking_origin_and_focuses() {
+        let fx = crate::testutil::fixture("feat/x");
+        let cfg = crate::testutil::config(&fx, "true");
+        let h = FakeHerdr::new();
+        let g = Git::new(&crate::runner::RealRunner);
+        let key = PrKey::new("o/r", 9);
+        let got = open_mine(&h, &g, &cfg, &mine_state(Some("feat/x")), &key).unwrap();
+        let path = mine_worktree_path(&cfg.worktrees_dir, &key);
+        assert_eq!(got, MineOpened::Created(path.clone()));
+        assert_eq!(crate::testutil::git(&path, &["rev-parse", "HEAD"]), fx.remote_sha("feat/x"));
+        assert_eq!(crate::testutil::git(&path, &["rev-parse", "--abbrev-ref", "@{u}"]), "origin/feat/x");
+        let ws = h.find_workspace(&fx.clone, &path).unwrap().unwrap();
+        assert_eq!(h.focus_calls.borrow().as_slice(), [ws]);
+
+        // segundo enter: só foca o mesmo worktree
+        let again = open_mine(&h, &g, &cfg, &mine_state(Some("feat/x")), &key).unwrap();
+        assert_eq!(again, MineOpened::Focused(path));
+        assert_eq!(h.focus_calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn open_mine_focuses_a_worktree_made_by_hand() {
+        let fx = crate::testutil::fixture("feat/x");
+        let cfg = crate::testutil::config(&fx, "true");
+        let h = FakeHerdr::new();
+        let g = Git::new(&crate::runner::RealRunner);
+        g.fetch_branch(&fx.clone, "feat/x").unwrap();
+        let mine = fx.root.join("meu-wt");
+        crate::testutil::git(&fx.clone, &["worktree", "add", "-q", "-b", "feat/x", mine.to_str().unwrap(), "origin/feat/x"]);
+        h.open.borrow_mut().insert("w7".into(), (fx.clone.clone(), mine.clone()));
+        let got = open_mine(&h, &g, &cfg, &mine_state(Some("feat/x")), &PrKey::new("o/r", 9)).unwrap();
+        assert_eq!(got, MineOpened::Focused(mine));
+        assert_eq!(h.focus_calls.borrow().as_slice(), ["w7".to_string()]);
+        assert!(!mine_worktree_path(&cfg.worktrees_dir, &PrKey::new("o/r", 9)).exists());
+    }
+
+    #[test]
+    fn open_mine_reuses_existing_local_branch_without_resetting_it() {
+        let fx = crate::testutil::fixture("feat/x");
+        let cfg = crate::testutil::config(&fx, "true");
+        let h = FakeHerdr::new();
+        let g = Git::new(&crate::runner::RealRunner);
+        g.fetch_branch(&fx.clone, "feat/x").unwrap();
+        // branch local com um commit que ainda não foi para o origin
+        let main = crate::testutil::git(&fx.clone, &["rev-parse", "main"]);
+        crate::testutil::git(&fx.clone, &["branch", "feat/x", &main]);
+        let key = PrKey::new("o/r", 9);
+        let path = mine_worktree_path(&cfg.worktrees_dir, &key);
+        // o fake só "abre" o que já conhece: registra o caminho como o herdr faria no `worktree open`
+        h.open.borrow_mut().insert("w3".into(), (fx.clone.clone(), path.clone()));
+        let got = open_mine(&h, &g, &cfg, &mine_state(Some("feat/x")), &key).unwrap();
+        assert_eq!(got, MineOpened::Created(path.clone()));
+        assert_eq!(crate::testutil::git(&path, &["rev-parse", "HEAD"]), main, "branch local fica como estava");
+        assert_eq!(h.focus_calls.borrow().as_slice(), ["w3".to_string()]);
+    }
+
+    #[test]
+    fn open_mine_refuses_unknown_branch_vanished_pr_and_foreign_dir() {
+        let fx = crate::testutil::fixture("feat/x");
+        let cfg = crate::testutil::config(&fx, "true");
+        let h = FakeHerdr::new();
+        let g = Git::new(&crate::runner::RealRunner);
+        let key = PrKey::new("o/r", 9);
+        let e = open_mine(&h, &g, &cfg, &mine_state(None), &key).unwrap_err();
+        assert!(e.to_string().contains("not known yet"), "{e:#}");
+        let e = open_mine(&h, &g, &cfg, &mine_state(Some("feat/x")), &PrKey::new("o/r", 8)).unwrap_err();
+        assert!(e.to_string().contains("no longer in the panel"), "{e:#}");
+        let path = mine_worktree_path(&cfg.worktrees_dir, &key);
+        std::fs::create_dir_all(&path).unwrap();
+        let e = open_mine(&h, &g, &cfg, &mine_state(Some("feat/x")), &key).unwrap_err();
+        assert!(e.to_string().contains("already exists"), "{e:#}");
+        assert!(h.focus_calls.borrow().is_empty());
     }
 }
