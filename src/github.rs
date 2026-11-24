@@ -164,7 +164,8 @@ pub fn fetch_pending(runner: &dyn Runner, repo: &str) -> RepoSnapshot {
     let Some((owner, name)) = repo.split_once('/') else {
         return RepoSnapshot::Failed(other(format!("invalid repo {repo}")));
     };
-    let search = format!("repo:{repo} is:pr is:open review-requested:@me");
+    // draft fica de fora: entra na fila quando o autor marca como pronto para revisão
+    let search = format!("repo:{repo} is:pr is:open draft:false review-requested:@me");
     let mut all = Vec::new();
     let mut cursor: Option<String> = None;
     for _ in 0..MAX_PAGES {
@@ -560,6 +561,8 @@ mod tests {
         }
         let first = fake.lines()[0].clone();
         assert!(first.contains("owner=o") && first.contains("name=r"));
+        // PR em draft não entra na fila: o autor ainda não pediu revisão de verdade
+        assert!(first.contains("draft:false"), "{first}");
         assert_eq!(fake.calls.borrow().len(), 2);
     }
 

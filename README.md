@@ -10,7 +10,7 @@ A herdr plugin adds a panel that shows your pending reviews, the state of each w
 
 ## How it works
 
-- **What it tracks.** Pull requests where your review was requested directly. It ignores PRs from forks and requests made only to a team you belong to.
+- **What it tracks.** Pull requests where your review was requested directly. It ignores drafts (a draft joins the queue once it is marked ready for review), PRs from forks and requests made only to a team you belong to.
 - **Polling.** The daemon checks GitHub through the `gh` CLI every `poll_interval_secs` (60 s by default).
 - **New request.** It creates a worktree on the PR's branch, opens a herdr workspace for it and runs the setup steps. Each step has its own timeout, and the output is saved to a redacted per-PR log.
 - **New commits.** When the PR gets new commits, it updates the worktree with `git reset --keep`, which refuses to overwrite local changes.
